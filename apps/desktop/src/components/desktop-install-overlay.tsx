@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Codicon } from '@/components/ui/codicon'
+import { ErrorIcon } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
 import { LogView } from '@/components/ui/log-view'
 import type {
@@ -11,7 +13,7 @@ import type {
   DesktopBootstrapState
 } from '@/global'
 import { useI18n } from '@/i18n'
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Loader2 } from '@/lib/icons'
+import { ChevronDown, ChevronRight } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 /**
@@ -109,21 +111,21 @@ function StageRow({ descriptor, result, isCurrent, now }: StageRowProps) {
   const icon = useMemo(() => {
     switch (state) {
       case 'running':
-        return <Loader2 className="h-4 w-4 animate-spin text-primary" />
+        return <Loader className="size-4" type="lemniscate-bloom" />
 
       case 'succeeded':
-        return <Check className="h-4 w-4 text-emerald-600" />
+        return <Codicon className="text-(--ui-text-secondary)" name="check" size="1rem" />
 
       case 'skipped':
-        return <Check className="h-4 w-4 text-muted-foreground" />
+        return <Codicon className="text-(--ui-text-tertiary)" name="check" size="1rem" />
 
       case 'failed':
-        return <AlertTriangle className="h-4 w-4 text-destructive" />
+        return <ErrorIcon size="1rem" />
 
       case 'pending':
 
       default:
-        return <div className="h-2 w-2 rounded-full border border-muted-foreground/40" />
+        return <div className="size-1.5 rounded-full border border-(--ui-stroke-secondary)" />
     }
   }, [state])
 
@@ -133,8 +135,7 @@ function StageRow({ descriptor, result, isCurrent, now }: StageRowProps) {
     <li
       className={cn(
         'flex items-start gap-3 rounded-md px-3 py-2 transition-colors',
-        isCurrent && 'bg-muted/60',
-        state === 'failed' && 'bg-destructive/10'
+        isCurrent && 'bg-(--ui-control-hover-background)'
       )}
     >
       <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center">{icon}</div>
@@ -353,12 +354,12 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
     return (
       <div className="fixed inset-0 z-[1400] flex items-center justify-center bg-background/90 backdrop-blur-md">
         <div className="w-full max-w-xl rounded-xl border border-(--stroke-nous) bg-card p-8 shadow-nous">
-          <h2 className="text-2xl font-semibold tracking-tight">{copy.oneTimeTitle}</h2>
+          <h2 className="text-xl font-semibold tracking-tight">{copy.oneTimeTitle}</h2>
           <p className="mt-2 text-sm text-muted-foreground">{copy.unsupportedDesc(platformLabel)}</p>
 
           <div className="mt-4">
             <div className="mb-1.5 text-xs font-medium text-muted-foreground">{copy.installCommand}</div>
-            <pre className="overflow-x-auto rounded-md border bg-muted/50 px-3 py-2.5 font-mono text-[12px]">
+            <pre className="overflow-x-auto rounded-md border border-(--stroke-nous) px-3 py-2.5 font-mono text-[12px]">
               <code>{ups.installCommand}</code>
             </pre>
             <div className="mt-2 flex items-center gap-2">
@@ -383,9 +384,9 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
             </div>
           </div>
 
-          <div className="mt-6 flex items-center justify-between border-t pt-4">
+          <div className="mt-6 flex items-center justify-between pt-2">
             <span className="text-xs text-muted-foreground">
-              {copy.installTo} <code className="rounded bg-muted/50 px-1 py-0.5 font-mono">{ups.activeRoot}</code>
+              {copy.installTo} <code className="font-mono text-(--ui-text-secondary)">{ups.activeRoot}</code>
             </span>
             <Button onClick={() => window.location.reload()} size="sm" variant="default">
               {copy.retryAfterRun}
@@ -418,7 +419,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
       <div className="flex w-full max-w-2xl max-h-[90vh] flex-col rounded-xl border border-(--stroke-nous) bg-card shadow-nous">
         {/* Header -- always visible, never scrolls */}
         <div className="flex-shrink-0 p-8 pb-4">
-          <h2 className="text-2xl font-semibold tracking-tight">
+          <h2 className="text-xl font-semibold tracking-tight">
             {failed ? copy.failedTitle : state.active ? copy.settingUpTitle : copy.finishingTitle}
           </h2>
           <p className="mt-1.5 text-sm text-muted-foreground">{failed ? copy.failedDesc : copy.activeDesc}</p>
@@ -436,7 +437,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                 </span>
                 <span className="tabular-nums">{progressPct}%</span>
               </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-(--ui-bg-tertiary)">
                 <div
                   className={cn('h-full transition-all duration-300', failed ? 'bg-destructive' : 'bg-primary')}
                   style={{ width: `${progressPct}%` }}
@@ -453,12 +454,12 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
           )}
 
           {failed && state.error && (
-            <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm">
-              <div className="mb-1 flex items-center gap-1.5 font-medium text-destructive">
-                <AlertTriangle className="h-4 w-4" />
-                <span>{copy.error}</span>
+            <div className="mb-4 flex items-start gap-2 text-sm">
+              <ErrorIcon className="mt-0.5 shrink-0" size="1rem" />
+              <div className="min-w-0">
+                <div className="font-medium text-destructive">{copy.error}</div>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-foreground/90">{state.error}</p>
               </div>
-              <p className="whitespace-pre-wrap break-words text-foreground/90">{state.error}</p>
             </div>
           )}
 
@@ -527,7 +528,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                 size="sm"
                 variant="ghost"
               >
-                {cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                {cancelling ? <Loader className="size-4" type="lemniscate-bloom" /> : null}
                 {cancelling ? copy.cancelling : copy.cancelInstall}
               </Button>
             </div>
@@ -540,7 +541,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs text-muted-foreground">
                 {copy.transcriptSaved}{' '}
-                <code className="rounded bg-muted/50 px-1 py-0.5 font-mono">%LOCALAPPDATA%\hermes\logs\</code>
+                <code className="font-mono text-(--ui-text-secondary)">%LOCALAPPDATA%\hermes\logs\</code>
               </span>
               <div className="flex gap-2">
                 <Button
