@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { getMemoryProviderConfig, saveMemoryProviderConfig } from '@/hermes'
 import { Check, Loader2, Save } from '@/lib/icons'
 import { notify, notifyError } from '@/store/notifications'
@@ -12,12 +13,28 @@ import type { MemoryProviderConfig, MemoryProviderField } from '@/types/hermes'
 import { CONTROL_TEXT } from './constants'
 import { LoadingState, Pill } from './primitives'
 
-/** Seed editable values from the schema: non-secret fields keep their current
- *  value, secret fields start blank (their value is never returned). */
+/** A field is active only when every clause in its `when` matches the current
+ *  values (e.g. Hindsight's `api_url` shows only `when` `mode === 'cloud'`). */
+function whenMatches(field: MemoryProviderField, values: Record<string, string>): boolean {
+  return field.when.every(clause => String(values[clause.key] ?? '') === clause.value)
+}
+
+/** Seed editable values from the schema. Secrets always start blank (their
+ *  value is never returned). Conditional fields are seeded against the
+ *  unconditional ones first so duplicate keys (same key, different `when`)
+ *  resolve to the variant that matches the current selection. */
 function seedValues(config: MemoryProviderConfig): Record<string, string> {
-  return Object.fromEntries(
-    config.fields.map(field => [field.key, field.kind === 'secret' ? '' : field.value])
-  )
+  const values: Record<string, string> = {}
+  const seed = (field: MemoryProviderField) => {
+    values[field.key] = field.kind === 'secret' ? '' : field.value
+  }
+
+  config.fields.filter(f => f.when.length === 0).forEach(seed)
+  config.fields.filter(f => f.when.length > 0 && whenMatches(f, values)).forEach(seed)
+  // Backfill any key not yet seeded (hidden variants) so saves never send undefined.
+  config.fields.filter(f => !(f.key in values)).forEach(seed)
+
+  return values
 }
 
 function FieldControl({
@@ -50,6 +67,15 @@ function FieldControl({
           <span className="text-xs text-muted-foreground">{selected?.description || field.description}</span>
         )}
       </>
+    )
+  }
+
+  if (field.kind === 'boolean') {
+    return (
+      <div className="flex items-center gap-2">
+        <Switch checked={value === 'true'} onCheckedChange={checked => onChange(checked ? 'true' : 'false')} />
+        <span className="text-xs text-muted-foreground">{value === 'true' ? 'On' : 'Off'}</span>
+      </div>
     )
   }
 
@@ -133,6 +159,7 @@ export function ProviderConfigPanel({ provider }: { provider: string }) {
   }
 
   const secretFields = config.fields.filter(field => field.kind === 'secret')
+  const visibleFields = config.fields.filter(field => whenMatches(field, values))
 
   return (
     <section className="py-3">
@@ -155,9 +182,22 @@ export function ProviderConfigPanel({ provider }: { provider: string }) {
 
       {expanded && (
         <div className="mt-3 grid gap-4 rounded-xl bg-background/60 p-4">
-          {config.fields.map(field => (
-            <label className="grid gap-1.5" key={field.key}>
-              <span className="text-xs font-medium text-muted-foreground">{field.label}</span>
+          {visibleFields.map((field, index) => (
+            <label className="grid gap-1.5" key={`${field.key}-${index}`}>
+              <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                {field.label}
+                {field.required && <span className="text-destructive">*</span>}
+                {field.url && (
+                  <a
+                    className="font-normal text-primary underline-offset-2 hover:underline"
+                    href={field.url}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Get key
+                  </a>
+                )}
+              </span>
               <FieldControl
                 field={field}
                 onChange={value => setValues(current => ({ ...current, [field.key]: value }))}

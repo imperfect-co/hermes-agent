@@ -155,6 +155,22 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
         ]
 
+    def read_current_config(self):
+        """Read back values save_config() wrote under plugins.hermes-memory-store."""
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+        try:
+            import yaml
+            config_path = Path(get_hermes_home()) / "config.yaml"
+            if config_path.exists():
+                with open(config_path, encoding="utf-8-sig") as f:
+                    existing = yaml.safe_load(f) or {}
+                values = (existing.get("plugins") or {}).get("hermes-memory-store")
+                return values if isinstance(values, dict) else {}
+        except Exception:
+            pass
+        return {}
+
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home
         _hermes_home = str(get_hermes_home())

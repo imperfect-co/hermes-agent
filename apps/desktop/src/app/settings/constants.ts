@@ -239,7 +239,10 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   'code_execution.mode': ['project', 'strict'],
   'context.engine': ['compressor', 'default', 'custom'],
   'delegation.reasoning_effort': ['', 'minimal', 'low', 'medium', 'high', 'xhigh'],
-  'memory.provider': ['', 'builtin', 'hindsight', 'honcho'],
+  // memory.provider is intentionally absent: the dropdown is populated at
+  // runtime from backend discovery (discover_memory_providers) in
+  // config-settings.tsx, so bundled + user-installed + pip providers all show
+  // up without hand-editing this list.
   // Terminal execution backends — kept in sync with the dispatch ladder in
   // tools/terminal_tool.py::_create_environment (local/docker/singularity/
   // modal/daytona/ssh). Remote backends need extra env (image, tokens, host).

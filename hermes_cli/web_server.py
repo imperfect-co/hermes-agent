@@ -65,7 +65,8 @@ from hermes_cli.config import (
 from hermes_cli.memory_providers import (
     MemoryProvider,
     ProviderField,
-    get_memory_provider,
+    coerce_value,
+    describe_provider,
 )
 from gateway.status import (
     get_running_pid,
@@ -3172,60 +3173,86 @@ def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
-def _memory_provider_config_path(provider: MemoryProvider) -> Path:
-    return get_hermes_home() / provider.name / "config.json"
+def _describe_memory_provider(name: str) -> Optional[MemoryProvider]:
+    """Load a live memory provider and normalize its declared config schema.
 
+    Returns ``None`` for providers that aren't discoverable or declare no
+    configurable fields (e.g. built-in), so the generic panel renders nothing.
+    """
 
-def _read_memory_provider_file(provider: MemoryProvider) -> Dict[str, Any]:
-    path = _memory_provider_config_path(provider)
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        from plugins.memory import (
+            discover_memory_providers,
+            load_memory_provider,
+        )
     except Exception:
-        _log.warning("Failed to read memory provider config from %s", path, exc_info=True)
+        return None
+
+    try:
+        label = next(
+            (
+                (desc or _label).split(".")[0].strip() or _label
+                for _label, desc, _avail in [
+                    (n, d, a) for n, d, a in discover_memory_providers() if n == name
+                ]
+            ),
+            None,
+        )
+    except Exception:
+        label = None
+
+    try:
+        provider = load_memory_provider(name)
+    except Exception:
+        provider = None
+    if provider is None:
+        return None
+
+    try:
+        schema = provider.get_config_schema() or []
+    except Exception:
+        _log.warning("get_config_schema() failed for memory provider %s", name, exc_info=True)
+        schema = []
+
+    descriptor = describe_provider(name, schema, label=label)
+    if not descriptor.fields:
+        return None
+    return descriptor
+
+
+def _read_provider_current(name: str) -> Dict[str, Any]:
+    """Best-effort read of a provider's persisted (non-secret) config values."""
+
+    try:
+        from plugins.memory import load_memory_provider
+
+        provider = load_memory_provider(name)
+        if provider is None:
+            return {}
+        data = provider.read_current_config()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        _log.debug("read_current_config() failed for memory provider %s", name, exc_info=True)
         return {}
-    return data if isinstance(data, dict) else {}
 
 
-def _read_field_value(field: ProviderField, data: Dict[str, Any]) -> str:
-    """Resolve the stored value for a non-secret field, honoring legacy reads."""
-
-    for source_key in (field.key, *field.aliases):
-        value = data.get(source_key)
-        if value:
-            return str(value)
-
+def _memory_provider_payload(descriptor: MemoryProvider) -> Dict[str, Any]:
+    current = _read_provider_current(descriptor.name)
     env_on_disk = load_env()
-    for env_key in field.env_fallbacks:
-        value = env_on_disk.get(env_key)
-        if value:
-            return str(value)
-
-    return field.default
-
-
-def _field_is_set(field: ProviderField, data: Dict[str, Any]) -> bool:
-    """Whether a secret field has a value anywhere it may have been written."""
-
-    env_on_disk = load_env()
-    for env_key in (field.env_key, *field.env_fallbacks):
-        if env_key and env_on_disk.get(env_key):
-            return True
-    return any(data.get(source_key) for source_key in (field.key, *field.aliases))
-
-
-def _memory_provider_payload(provider: MemoryProvider) -> Dict[str, Any]:
-    data = _read_memory_provider_file(provider)
     fields: List[Dict[str, Any]] = []
 
-    for field in provider.fields:
+    for field in descriptor.fields:
         entry: Dict[str, Any] = {
             "key": field.key,
             "label": field.label,
             "kind": field.kind,
+            "value_type": field.value_type,
+            "default": field.default,
             "description": field.description,
             "placeholder": field.placeholder,
+            "required": field.required,
+            "url": field.url,
+            "when": [{"key": k, "value": v} for k, v in field.when],
             "options": [
                 {"value": opt.value, "label": opt.label, "description": opt.description}
                 for opt in field.options
@@ -3235,83 +3262,96 @@ def _memory_provider_payload(provider: MemoryProvider) -> Dict[str, Any]:
         if field.is_secret:
             # Secrets are write-only over the API; only expose whether one is set.
             entry["value"] = ""
-            entry["is_set"] = _field_is_set(field, data)
+            entry["is_set"] = bool(field.env_key and env_on_disk.get(field.env_key))
+        elif field.key in current and current[field.key] not in (None, ""):
+            entry["value"] = _default_to_display(current[field.key], field)
+            entry["is_set"] = True
         else:
-            value = _read_field_value(field, data)
-            if field.kind == "select" and value not in field.allowed_values():
-                value = field.default
-            entry["value"] = value
-            entry["is_set"] = bool(value)
+            entry["value"] = field.default
+            entry["is_set"] = False
 
         fields.append(entry)
 
-    return {"name": provider.name, "label": provider.label, "fields": fields}
+    return {"name": descriptor.name, "label": descriptor.label, "fields": fields}
 
 
-def _coerce_field_value(field: ProviderField, raw: str) -> str:
-    """Validate and normalize a submitted non-secret value, or raise ValueError."""
+def _default_to_display(value: Any, field: ProviderField) -> str:
+    """Render a stored native value back to the string form the panel edits."""
 
-    value = (raw or "").strip()
-    if field.kind == "select":
-        if not value:
-            value = field.default
-        if value not in field.allowed_values():
-            raise ValueError(f"Invalid value for '{field.key}'")
-        return value
-    return value or field.default
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 @app.get("/api/memory/providers/{name}/config")
 async def get_memory_provider_config(name: str):
-    provider = get_memory_provider(name)
-    if provider is None:
-        # Undeclared providers (e.g. builtin) have no config surface. Return an
-        # empty schema so the generic panel simply renders nothing.
+    descriptor = _describe_memory_provider(name)
+    if descriptor is None:
+        # Undeclared/built-in providers have no config surface. Return an empty
+        # schema so the generic panel simply renders nothing.
         return {"name": name, "label": name, "fields": []}
-    return _memory_provider_payload(provider)
+    return _memory_provider_payload(descriptor)
 
 
 @app.put("/api/memory/providers/{name}/config")
 async def update_memory_provider_config(name: str, body: MemoryProviderConfigUpdate):
-    provider = get_memory_provider(name)
-    if provider is None:
+    descriptor = _describe_memory_provider(name)
+    if descriptor is None:
         raise HTTPException(status_code=404, detail=f"Unknown memory provider: {name}")
 
     values = body.values or {}
 
     try:
-        existing = _read_memory_provider_file(provider)
-        json_values: Dict[str, Any] = {}
+        # Resolve the effective value of every field first so ``when`` clauses
+        # are evaluated against what the user actually submitted (e.g. the
+        # selected mode), not stale state.
+        resolved: Dict[str, str] = {}
+        for field in descriptor.fields:
+            if field.key in values:
+                resolved[field.key] = values[field.key]
+            elif not field.is_secret:
+                resolved[field.key] = field.default
+
+        config_values: Dict[str, Any] = {}
         secrets: Dict[str, str] = {}
 
-        for field in provider.fields:
+        for field in descriptor.fields:
+            # Skip fields gated off by an unmet ``when`` clause — they aren't
+            # shown to the user, so don't validate or persist them.
+            if not field.when_matches(resolved):
+                continue
+
             if field.is_secret:
                 submitted = (values.get(field.key) or "").strip()
                 if submitted and field.env_key:
                     secrets[field.env_key] = submitted
                 continue
 
-            raw = (
-                values[field.key]
-                if field.key in values
-                else str(existing.get(field.key, field.default))
-            )
-            json_values[field.key] = _coerce_field_value(field, raw)
+            raw = values.get(field.key, field.default)
+            config_values[field.key] = coerce_value(field, raw)
 
         config = load_config()
         memory_config = config.get("memory")
         if not isinstance(memory_config, dict):
             memory_config = {}
             config["memory"] = memory_config
-        memory_config["provider"] = provider.name
+        memory_config["provider"] = descriptor.name
         save_config(config)
 
-        path = _memory_provider_config_path(provider)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing.update(json_values)
-        from utils import atomic_json_write
+        # Persist non-secret values through the provider's own save_config() so
+        # each provider keeps ownership of its native storage layout (this is
+        # the same path `hermes memory setup` uses).
+        if config_values:
+            try:
+                from plugins.memory import load_memory_provider
 
-        atomic_json_write(path, existing, mode=0o600)
+                provider = load_memory_provider(descriptor.name)
+                if provider is not None and hasattr(provider, "save_config"):
+                    provider.save_config(config_values, str(get_hermes_home()))
+            except Exception:
+                _log.exception(
+                    "save_config() failed for memory provider %s", descriptor.name
+                )
 
         for env_key, secret in secrets.items():
             save_env_value(env_key, secret)

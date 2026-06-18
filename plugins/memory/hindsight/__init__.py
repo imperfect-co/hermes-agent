@@ -692,6 +692,20 @@ class HindsightMemoryProvider(MemoryProvider):
         from utils import atomic_json_write
         atomic_json_write(config_path, existing, mode=0o600)
 
+    def read_current_config(self):
+        """Best-effort read-back of stored config for the desktop config panel.
+
+        Hindsight's deepest configuration (mode-specific deps, nested bank
+        layout) is owned by ``post_setup`` / ``hermes memory setup``; the
+        panel round-trips the common flat fields (mode, api_url, timeouts,
+        retain/recall tuning) it persists via ``save_config``.
+        """
+        try:
+            cfg = _load_config()
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            return {}
+
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""
         import subprocess

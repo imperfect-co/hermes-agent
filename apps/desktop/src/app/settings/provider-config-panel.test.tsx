@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { MemoryProviderConfig } from '@/types/hermes'
+import type { MemoryProviderConfig, MemoryProviderField } from '@/types/hermes'
 
 const getMemoryProviderConfig = vi.fn()
 const saveMemoryProviderConfig = vi.fn()
@@ -16,62 +16,65 @@ vi.mock('@/store/notifications', () => ({
   notifyError: vi.fn()
 }))
 
-function hindsightSchema(overrides: Partial<MemoryProviderConfig['fields'][number]>[] = []): MemoryProviderConfig {
-  const fields: MemoryProviderConfig['fields'] = [
-    {
+function field(partial: Partial<MemoryProviderField> & Pick<MemoryProviderField, 'key'>): MemoryProviderField {
+  return {
+    default: '',
+    description: '',
+    is_set: false,
+    kind: 'text',
+    label: partial.key,
+    options: [],
+    placeholder: '',
+    required: false,
+    url: '',
+    value: '',
+    value_type: 'str',
+    when: [],
+    ...partial
+  }
+}
+
+function hindsightSchema(overrides: Partial<MemoryProviderField>[] = []): MemoryProviderConfig {
+  const fields: MemoryProviderField[] = [
+    field({
       key: 'mode',
       label: 'Mode',
       kind: 'select',
       value: 'cloud',
-      description: 'How Hermes connects to Hindsight.',
-      placeholder: '',
       is_set: true,
+      description: 'How Hermes connects to Hindsight.',
       options: [
         { value: 'cloud', label: 'Cloud', description: 'Hindsight Cloud API (lightweight, just needs an API key)' },
         { value: 'local_external', label: 'Local External', description: 'Connect to an existing Hindsight instance' }
       ]
-    },
-    {
+    }),
+    field({
       key: 'api_key',
       label: 'API key',
       kind: 'secret',
-      value: '',
       description: 'Used to authenticate with the Hindsight API.',
-      placeholder: 'Enter Hindsight API key',
-      is_set: false,
-      options: []
-    },
-    {
-      key: 'api_url',
-      label: 'API URL',
-      kind: 'text',
-      value: 'https://api.hindsight.vectorize.io',
-      description: '',
-      placeholder: '',
-      is_set: true,
-      options: []
-    },
-    { key: 'bank_id', label: 'Bank ID', kind: 'text', value: 'hermes', description: '', placeholder: '', is_set: true, options: [] },
-    {
+      placeholder: 'Enter Hindsight API key'
+    }),
+    field({ key: 'api_url', label: 'API URL', value: 'https://api.hindsight.vectorize.io', is_set: true }),
+    field({ key: 'bank_id', label: 'Bank ID', value: 'hermes', is_set: true }),
+    field({
       key: 'recall_budget',
       label: 'Recall budget',
       kind: 'select',
       value: 'mid',
-      description: '',
-      placeholder: '',
       is_set: true,
       options: [
         { value: 'low', label: 'low', description: '' },
         { value: 'mid', label: 'mid', description: '' },
         { value: 'high', label: 'high', description: '' }
       ]
-    }
+    })
   ]
 
   return {
     name: 'hindsight',
     label: 'Hindsight',
-    fields: fields.map((field, index) => ({ ...field, ...overrides[index] }))
+    fields: fields.map((f, index) => ({ ...f, ...overrides[index] }))
   }
 }
 
@@ -138,5 +141,56 @@ describe('ProviderConfigPanel', () => {
 
     await waitFor(() => expect(getMemoryProviderConfig).toHaveBeenCalledWith('builtin'))
     expect(container.querySelector('section')).toBeNull()
+  })
+
+  it('shows and hides fields based on their when-clause as the mode changes', async () => {
+    getMemoryProviderConfig.mockResolvedValue({
+      name: 'hindsight',
+      label: 'Hindsight',
+      fields: [
+        field({
+          key: 'mode',
+          label: 'Mode',
+          kind: 'select',
+          value: 'cloud',
+          options: [
+            { value: 'cloud', label: 'Cloud', description: '' },
+            { value: 'local_embedded', label: 'Local Embedded', description: '' }
+          ]
+        }),
+        field({ key: 'api_url', label: 'API URL', value: 'https://api', when: [{ key: 'mode', value: 'cloud' }] }),
+        field({ key: 'llm_model', label: 'LLM model', value: 'gpt-4o-mini', when: [{ key: 'mode', value: 'local_embedded' }] })
+      ]
+    })
+
+    await renderPanel()
+
+    // Cloud is selected: the cloud-gated field shows, the embedded one doesn't.
+    expect(await screen.findByLabelText('API URL')).toBeTruthy()
+    expect(screen.queryByLabelText('LLM model')).toBeNull()
+
+    fireEvent.click(screen.getByRole('combobox'))
+    fireEvent.click(screen.getByRole('option', { name: 'Local Embedded' }))
+
+    // Switching to local_embedded flips which gated field is visible.
+    expect(await screen.findByLabelText('LLM model')).toBeTruthy()
+    expect(screen.queryByLabelText('API URL')).toBeNull()
+  })
+
+  it('renders a boolean field as a toggle and saves it as a string', async () => {
+    getMemoryProviderConfig.mockResolvedValue({
+      name: 'hindsight',
+      label: 'Hindsight',
+      fields: [field({ key: 'auto_recall', label: 'Auto recall', kind: 'boolean', value: 'true', value_type: 'bool', is_set: true })]
+    })
+
+    await renderPanel()
+
+    const toggle = await screen.findByRole('switch')
+    expect(toggle).toBeTruthy()
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(saveMemoryProviderConfig).toHaveBeenCalledWith('hindsight', { auto_recall: 'false' }))
   })
 })

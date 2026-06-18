@@ -271,6 +271,20 @@ class HonchoMemoryProvider(MemoryProvider):
             {"key": "baseUrl", "description": "Honcho base URL (for self-hosted)"},
         ]
 
+    def read_current_config(self):
+        """Read back the non-secret values save_config() wrote to honcho.json."""
+        import json
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+        try:
+            path = Path(get_hermes_home()) / "honcho.json"
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
+
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Run the full Honcho setup wizard after provider selection."""
         import types

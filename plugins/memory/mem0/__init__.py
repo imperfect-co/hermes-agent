@@ -166,6 +166,12 @@ class Mem0MemoryProvider(MemoryProvider):
             {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
         ]
 
+    def read_current_config(self):
+        try:
+            return _load_config()
+        except Exception:
+            return {}
+
     def _get_client(self):
         """Thread-safe client accessor with lazy initialization."""
         with self._client_lock:

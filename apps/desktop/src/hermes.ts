@@ -18,6 +18,7 @@ import type {
   HermesConfigRecord,
   LogsResponse,
   MemoryProviderConfig,
+  MemoryStatus,
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
   MessagingPlatformUpdate,
@@ -338,6 +339,13 @@ export function saveHermesConfig(config: HermesConfigRecord): Promise<{ ok: bool
     path: '/api/config',
     method: 'PUT',
     body: { config }
+  })
+}
+
+export function getMemoryStatus(): Promise<MemoryStatus> {
+  return window.hermesDesktop.api<MemoryStatus>({
+    ...profileScoped(),
+    path: '/api/memory'
   })
 }
 

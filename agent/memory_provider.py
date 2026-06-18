@@ -276,6 +276,27 @@ class MemoryProvider(ABC):
           should all have ``env_var`` set and this method stays no-op).
         """
 
+    def read_current_config(self) -> Dict[str, Any]:
+        """Return persisted config values for schema-driven setup UIs.
+
+        Powers the desktop memory-provider config panel (and any other
+        editor built off ``get_config_schema()``): on open, declared fields
+        are pre-filled with the values the provider previously saved via
+        ``save_config()``. The mirror image of ``save_config()`` — it reads
+        back what that wrote.
+
+        Return the provider's stored config as a flat dict keyed by the same
+        ``key`` names used in ``get_config_schema()``. Secret values may be
+        included or omitted; callers MUST treat fields marked ``secret`` as
+        write-only and never echo them back regardless. Default returns
+        ``{}`` (the UI falls back to schema defaults). Providers that persist
+        non-secret config should override this — usually a one-liner
+        delegating to the same loader ``initialize()`` uses.
+
+        Must not raise — return ``{}`` on any error.
+        """
+        return {}
+
     def on_memory_write(
         self,
         action: str,

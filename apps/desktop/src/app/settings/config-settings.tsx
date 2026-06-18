@@ -11,6 +11,7 @@ import {
   getHermesConfigDefaults,
   getHermesConfigRecord,
   getHermesConfigSchema,
+  getMemoryStatus,
   saveHermesConfig
 } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -198,6 +199,8 @@ export function ConfigSettings({
   const [schema, setSchema] = useState<Record<string, ConfigFieldSchema> | null>(null)
   const [elevenLabsVoiceOptions, setElevenLabsVoiceOptions] = useState<string[] | null>(null)
   const [elevenLabsVoiceLabels, setElevenLabsVoiceLabels] = useState<Record<string, string>>({})
+  const [memoryProviderOptions, setMemoryProviderOptions] = useState<string[] | null>(null)
+  const [memoryProviderLabels, setMemoryProviderLabels] = useState<Record<string, string>>({})
   const saveVersionRef = useRef(0)
   const [saveVersion, setSaveVersion] = useState(0)
 
@@ -234,6 +237,37 @@ export function ConfigSettings({
         if (!cancelled) {
           setElevenLabsVoiceOptions(null)
           setElevenLabsVoiceLabels({})
+        }
+      })
+
+    return () => void (cancelled = true)
+  }, [])
+
+  // Memory provider dropdown is driven by backend discovery (bundled +
+  // user-installed + pip plugins), not a hardcoded enum — every discovered
+  // provider shows up automatically. '' is the built-in (MEMORY.md/USER.md).
+  useEffect(() => {
+    let cancelled = false
+
+    getMemoryStatus()
+      .then(status => {
+        if (cancelled) {
+          return
+        }
+
+        const names = status.providers.map(p => p.name)
+        setMemoryProviderOptions(['', ...names])
+        setMemoryProviderLabels({
+          '': 'Built-in (MEMORY.md / USER.md)',
+          ...Object.fromEntries(
+            status.providers.map(p => [p.name, p.description ? `${p.name} — ${p.description}` : p.name])
+          )
+        })
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMemoryProviderOptions(null)
+          setMemoryProviderLabels({})
         }
       })
 
@@ -361,10 +395,18 @@ export function ConfigSettings({
                 enumOptions={
                   key === 'tts.elevenlabs.voice_id'
                     ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
-                    : enumOptionsFor(key, getNested(config, key), config)
+                    : key === 'memory.provider'
+                      ? enumOptionsFor(key, getNested(config, key), config, memoryProviderOptions ?? [''])
+                      : enumOptionsFor(key, getNested(config, key), config)
                 }
                 onChange={value => updateConfig(setNested(config, key, value))}
-                optionLabels={key === 'tts.elevenlabs.voice_id' ? elevenLabsVoiceLabels : undefined}
+                optionLabels={
+                  key === 'tts.elevenlabs.voice_id'
+                    ? elevenLabsVoiceLabels
+                    : key === 'memory.provider'
+                      ? memoryProviderLabels
+                      : undefined
+                }
                 schema={field}
                 schemaKey={key}
                 value={getNested(config, key)}
