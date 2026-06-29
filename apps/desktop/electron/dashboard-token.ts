@@ -9,7 +9,7 @@
 
 const DEFAULT_TOKEN_FETCH_TIMEOUT_MS = 3_000
 
-async function fetchPublicText(url, options = {}) {
+async function fetchPublicText(url, options: any = {}) {
   const { protocol } = new URL(url)
 
   if (protocol !== 'http:' && protocol !== 'https:') {
@@ -49,7 +49,7 @@ function dashboardIndexUrl(baseUrl) {
   return `${String(baseUrl || '').replace(/\/+$/, '')}/`
 }
 
-async function resolveServedDashboardToken(baseUrl, fallbackToken, options = {}) {
+async function resolveServedDashboardToken(baseUrl, fallbackToken, options: any = {}) {
   const fetchText = options.fetchText || fetchPublicText
 
   const html = await fetchText(dashboardIndexUrl(baseUrl), {

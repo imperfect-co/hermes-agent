@@ -39,7 +39,7 @@ const DEFAULT_READY_GRACE_MS = 750
  * @returns {Promise<{ ok: boolean, reason?: string }>}
  */
 function probeGatewayWebSocket<T>(wsUrl: string, options:{
-  WebSocketImpl?: <T>(url: string) => T,
+  WebSocketImpl?: any,
   connectTimeoutMs?: number
   readyGraceMs?: number
 } = {}) {
@@ -54,7 +54,7 @@ function probeGatewayWebSocket<T>(wsUrl: string, options:{
     })
   }
 
-  return new Promise(resolve => {
+  return new Promise<any>(resolve => {
     let settled = false
     let opened = false
     let connectTimer = null

@@ -8,7 +8,7 @@ import path from 'node:path'
 
 import { resolveRequestedPathForIpc } from './hardening'
 
-function runGit(gitBin, args, cwd) {
+function runGit(gitBin, args, cwd): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       gitBin,

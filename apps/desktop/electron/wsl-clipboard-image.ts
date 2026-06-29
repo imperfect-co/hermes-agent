@@ -57,7 +57,7 @@ function decodeClipboardImageBase64(stdout) {
 // Read the Windows clipboard image from inside WSL. Returns a PNG Buffer, or
 // null when there's no image, PowerShell is unreachable, or output is invalid.
 // Linux-only by contract (caller gates on IS_WSL); never throws.
-function readWslWindowsClipboardImage({ exec = execFileSync, candidates = powershellCandidates() } = {}) {
+function readWslWindowsClipboardImage({ exec = execFileSync, candidates = powershellCandidates() }: {exec?: typeof execFileSync, candidates?: string[]} = {}) {
   const encoded = encodePowerShellCommand(PS_SCRIPT)
 
   for (const ps of candidates) {

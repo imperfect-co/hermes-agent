@@ -66,7 +66,7 @@ function modeRemovesUserData(mode) {
  * Returns null when we can't confidently identify a removable bundle (e.g.
  * running from a dev checkout, or a system-package install we must not rmtree).
  */
-function resolveRemovableAppPath(execPath, platform, env = {}) {
+function resolveRemovableAppPath(execPath, platform, env: any = {}) {
   const exe = String(execPath || '')
 
   if (!exe) {return null}

@@ -102,7 +102,7 @@ test('isForeignBackendToken only flags a mismatched token from a dead child', ()
   ]
 
   for (const [input, expected] of cases) {
-    assert.equal(isForeignBackendToken(input), expected, JSON.stringify(input))
+    assert.equal(isForeignBackendToken(input as any), expected, JSON.stringify(input))
   }
 })
 

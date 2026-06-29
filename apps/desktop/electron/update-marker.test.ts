@@ -30,11 +30,11 @@ function writeMarker(home, pid, startedAtSec) {
   fs.writeFileSync(markerPath(home), `${pid}\n${startedAtSec}`)
 }
 
-const ALIVE = () => true // injected kill that "succeeds" => pid alive
+const ALIVE: typeof process.kill = () => true // injected kill that "succeeds" => pid alive
 
-const DEAD = () => {
-  const err = new Error('no such process')
-  err.code = 'ESRCH'
+const DEAD : typeof process.kill= () => {
+  const err = new Error('no such process');
+  (err as any).code = 'ESRCH'
   throw err
 }
 
@@ -86,8 +86,8 @@ test('isPidAlive: own pid is alive, impossible pid is dead', () => {
 
 test('isPidAlive: EPERM counts as alive (process owned by another user)', () => {
   const eperm = () => {
-    const err = new Error('operation not permitted')
-    err.code = 'EPERM'
+    const err = new Error('operation not permitted');
+    (err as any).code = 'EPERM'
     throw err
   }
 

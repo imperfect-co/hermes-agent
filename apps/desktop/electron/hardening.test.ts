@@ -13,8 +13,8 @@ import { DEFAULT_FETCH_TIMEOUT_MS,
   resolveTimeoutMs,
   sensitiveFileBlockReason } from './hardening'
 
-async function rejectsWithCode(promise, code) {
-  await assert.rejects(promise, error => {
+async function rejectsWithCode(promise, code: string) {
+  await assert.rejects(promise, (error: any) => {
     assert.equal(error?.code, code)
 
     return true
@@ -75,7 +75,7 @@ test('path helpers reject blank non-string NUL and Windows device syntax', async
   for (const devicePath of devicePaths) {
     assert.throws(
       () => resolveRequestedPathForIpc(devicePath, { purpose: 'File preview' }),
-      error => {
+      (error: any) => {
         assert.equal(error?.code, 'device-path')
 
         return true
@@ -86,7 +86,7 @@ test('path helpers reject blank non-string NUL and Windows device syntax', async
 
   assert.throws(
     () => resolveRequestedPathForIpc('file:///%E0%A4%A', { purpose: 'File preview' }),
-    error => {
+    (error: any) => {
       assert.equal(error?.code, 'invalid-path')
 
       return true

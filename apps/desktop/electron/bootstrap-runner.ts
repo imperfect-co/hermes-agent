@@ -324,8 +324,8 @@ function resolveWindowsPowerShell() {
   return 'powershell.exe'
 }
 
-function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome } = {}) {
-  return new Promise((resolve, reject) => {
+function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome }: any = {}) {
+  return new Promise<any>((resolve, reject) => {
     const ps = process.platform === 'win32' ? resolveWindowsPowerShell() : 'pwsh'
     const fullArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args]
 
@@ -406,16 +406,16 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
       if (abortSignal) {abortSignal.removeEventListener('abort', onAbort)}
 
       // Flush any trailing bytes
-      if (stdoutBuf) {emit && emit({ type: 'log', stage: stageName, line: stdoutBuf, stream: 'stdout' })}
+      if (stdoutBuf) {emit && emit({ type: 'log', stage: stageName, line: stdoutBuf, stream: 'stdout' } as any)}
 
-      if (stderrBuf) {emit && emit({ type: 'log', stage: stageName, line: stderrBuf, stream: 'stderr' })}
-      resolve({ stdout, stderr, code, signal, killed })
+      if (stderrBuf) {emit && emit({ type: 'log', stage: stageName, line: stderrBuf, stream: 'stderr' } as any)}
+      resolve({ stdout, stderr, code, signal, killed } as any)
     })
   })
 }
 
-function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome } = {}) {
-  return new Promise((resolve, reject) => {
+function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome }: any = {}) {
+  return new Promise<any>((resolve, reject) => {
     const child = spawn('bash', [scriptPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
@@ -783,9 +783,9 @@ async function runBootstrap(opts) {
       })
 
       if (ev.state === 'failed') {
-        emit({ type: 'failed', stage: stage.name, error: ev.error || 'stage failed' })
+        emit({ type: 'failed', stage: stage.name, error: (ev as any).error || 'stage failed' })
 
-        return { ok: false, failedStage: stage.name, error: ev.error }
+        return { ok: false, failedStage: stage.name, error: (ev as any).error }
       }
     }
 

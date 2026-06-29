@@ -37,7 +37,7 @@ function markerPath(hermesHome) {
 // not deliver a signal — it just probes existence/permission. ESRCH => dead;
 // EPERM => alive but owned by another user (still "alive" for our purposes).
 // Injectable `kill` keeps it unit-testable.
-function isPidAlive(pid, kill = process.kill.bind(process)) {
+function isPidAlive(pid, kill: typeof process.kill = process.kill.bind(process)) {
   if (!Number.isInteger(pid) || pid <= 0) {return false}
 
   try {
@@ -61,7 +61,9 @@ function isPidAlive(pid, kill = process.kill.bind(process)) {
  * Pure-ish: file I/O against the given path, plus an injectable pid probe and
  * clock for tests.
  */
-function readLiveUpdateMarker(hermesHome, { kill, now = Date.now, maxAgeMs = UPDATE_MARKER_MAX_AGE_MS } = {}) {
+function readLiveUpdateMarker(hermesHome, { kill, now = Date.now, maxAgeMs = UPDATE_MARKER_MAX_AGE_MS }: {
+  now?: () => number, maxAgeMs?: number, kill?: typeof process.kill
+} = {}) {
   const file = markerPath(hermesHome)
   let raw
 

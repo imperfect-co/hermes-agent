@@ -8,24 +8,24 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import simpleGitFn from 'simple-git'
+
 import { resolveRequestedPathForIpc } from './hardening'
 
 // `simple-git` is a pure-JS runtime dep that workspace dedup hoists into the
 // repo-root node_modules.  Packaged builds set `files:` in package.json, which
-// excludes node_modules from the asar, so the normal require() fails at launch
+// excludes node_modules from the asar, so a normal import fails at launch
 // (issue #52735: "Cannot find module 'simple-git'").  We ship the dep's
 // closure under resources/native-deps/vendor/node_modules/ via extraResources
-// + scripts/stage-native-deps.cjs, and resolve from there when the hoisted
-// require() isn't reachable.  The `vendor/` nesting matters: electron-builder
+// + scripts/stage-native-deps.mjs, and resolve from there when the hoisted
+// import isn't reachable.  The `vendor/` nesting matters: electron-builder
 // drops a node_modules dir at the root of an extraResources copy but keeps a
 // nested one.  Dev mode never hits the fallback -- Node's normal lookup finds
 // the hoisted copy.
-let simpleGit
+let simpleGit = simpleGitFn
 
-try {
-  simpleGit = require('simple-git')
-} catch {
-  const resourcesPath = process.resourcesPath
+if (!simpleGit) {
+  const resourcesPath = (process as any).resourcesPath
 
   if (!resourcesPath) {
     throw new Error("git-review IPC: 'simple-git' not found and no resourcesPath to fall back to")
@@ -53,7 +53,7 @@ function ghEnv(ghBin) {
 
 // Run the `gh` CLI in a repo. Resolves { ok, stdout } so callers branch on
 // availability/auth without a throw. gh missing/unauthed → ok:false.
-function runGh(args, cwd, ghBin) {
+function runGh(args, cwd, ghBin): Promise<{ok: boolean, stdout: string}> {
   return new Promise(resolve => {
     execFile(
       ghBin || 'gh',
@@ -264,8 +264,8 @@ async function reviewList(repoPath, scope, baseRef, gitBin) {
 
       const files = summary.files.map(file => ({
         path: resolveRenamePath(file.file),
-        added: file.binary ? 0 : file.insertions,
-        removed: file.binary ? 0 : file.deletions,
+        added: 'insertions' in file ? file.insertions : 0 ,
+        removed: 'deletions' in file ? file.deletions : 0 ,
         status: 'M',
         staged: false
       }))

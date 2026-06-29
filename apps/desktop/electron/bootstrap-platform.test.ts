@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { bundledRuntimeImportCheck,
   detectRemoteDisplay,
@@ -85,7 +86,7 @@ test('detectRemoteDisplay honors the HERMES_DESKTOP_DISABLE_GPU override both wa
 })
 
 test('packaged electron entrypoints do not require unpackaged npm modules', () => {
-  const electronDir = __dirname
+  const electronDir = path.dirname(fileURLToPath(import.meta.url))
   const entrypoints = ['main.ts', 'preload.ts', 'bootstrap-platform.ts']
   // - electron: provided by the electron runtime, always resolvable in packaged builds.
   // - node-pty: hoisted by workspace dedup AND shipped via extraResources to

@@ -1,7 +1,7 @@
 import path from 'node:path'
 
 /** True when `dir` lives inside a packaged app bundle / install tree. */
-function isPackagedInstallPath(dir, { installRoots, isPackaged }) {
+function isPackagedInstallPath(dir, { installRoots, isPackaged }: { installRoots: string[], isPackaged:boolean }) {
   if (!isPackaged || !dir) {
     return false
   }
@@ -21,7 +21,7 @@ function isPackagedInstallPath(dir, { installRoots, isPackaged }) {
       return true
     }
 
-    const rel = path.relative(root, resolved)
+    const rel = path.relative(root, resolved) as any
 
     if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
       return true

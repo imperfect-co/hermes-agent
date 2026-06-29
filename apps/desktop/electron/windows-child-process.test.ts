@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const ELECTRON_DIR = __dirname
+const ELECTRON_DIR = path.dirname(fileURLToPath(import.meta.url))
 
 function readElectronFile(name) {
   return fs.readFileSync(path.join(ELECTRON_DIR, name), 'utf8').replace(/\r\n/g, '\n')
@@ -80,7 +81,7 @@ test('intentional or interactive desktop child processes stay documented', () =>
 })
 
 test('bootstrap PowerShell runner hides Windows console children', () => {
-  const source = readElectronFile('bootstrap-runner.cjs')
+  const source = readElectronFile('bootstrap-runner.ts')
 
   assert.match(source, /function hiddenWindowsChildOptions\(options = \{\}\)/)
   requireHiddenChildOptions(source, 'spawn(ps, fullArgs')

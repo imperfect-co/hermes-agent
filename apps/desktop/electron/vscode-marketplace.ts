@@ -28,7 +28,7 @@ function request(
   url,
   { method = 'GET', headers = {}, body = null, maxBytes = MAX_VSIX_BYTES } = {},
   redirectsLeft = MAX_REDIRECTS
-) {
+): Promise<Buffer<ArrayBuffer>> {
   return new Promise((resolve, reject) => {
     const req = https.request(url, { method, headers }, res => {
       const status = res.statusCode ?? 0

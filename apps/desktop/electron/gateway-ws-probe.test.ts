@@ -16,10 +16,13 @@ import { probeGatewayWebSocket } from './gateway-ws-probe'
 
 // Minimal WebSocket double: records listeners synchronously (the probe attaches
 // them in its executor) and exposes emit() so the test can replay events.
-function makeFakeWs() {
+function makeFakeWs(): { FakeWs: new (url: string) => any; instances: any[] } {
   const instances = []
 
   class FakeWs {
+    url: string
+    closed = false
+    listeners: Record<string, any[]> = {}
     constructor(url) {
       this.url = url
       this.listeners = {}
@@ -33,7 +36,9 @@ function makeFakeWs() {
       this.closed = true
     }
     emit(type, event) {
-      for (const fn of this.listeners[type] || []) {fn(event)}
+      for (const fn of this.listeners[type] || []) {
+        fn(event)
+      }
     }
   }
 

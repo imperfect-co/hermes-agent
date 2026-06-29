@@ -48,11 +48,11 @@ test('readWslWindowsClipboardImage decodes the first candidate that returns a PN
   const png = fakePngBuffer()
   const calls = []
 
-  const exec = (cmd, args) => {
+  const exec = ((cmd, args) => {
     calls.push({ cmd, args })
 
     return png.toString('base64')
-  }
+  }) as any
 
   const result = readWslWindowsClipboardImage({ exec, candidates: ['powershell.exe'] })
   assert.ok(result && result.equals(png))
@@ -66,11 +66,11 @@ test('readWslWindowsClipboardImage decodes the first candidate that returns a PN
 test('readWslWindowsClipboardImage returns null and stops when stdout is empty (no image)', () => {
   let count = 0
 
-  const exec = () => {
+  const exec =(() => {
     count += 1
 
-    return ''
-  }
+    return '' 
+  } )as any
 
   const result = readWslWindowsClipboardImage({
     exec,
@@ -93,7 +93,7 @@ test('readWslWindowsClipboardImage falls through to the next candidate when one 
       throw Object.assign(new Error('not found'), { code: 'ENOENT' })
     }
 
-    return png.toString('base64')
+    return png.toString('base64') as any
   }
 
   const result = readWslWindowsClipboardImage({

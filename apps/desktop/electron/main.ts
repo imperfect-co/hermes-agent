@@ -1,3 +1,5 @@
+type Method = string
+import type { ExecFileSyncOptionsWithStringEncoding} from 'node:child_process';
 import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -154,12 +156,12 @@ const PRELOAD_PATH = IS_PACKAGED
   ? path.join(APP_ROOT, 'dist', 'electron-preload.js')
   : path.join(__dirname, 'preload.ts')
 
-function hiddenWindowsChildOptions(options = {}) {
+function hiddenWindowsChildOptions(options: any = {}): ExecFileSyncOptionsWithStringEncoding  {
   if (!IS_WINDOWS || Object.prototype.hasOwnProperty.call(options, 'windowsHide')) {
-    return options
+    return options as any
   }
 
-  return { ...options, windowsHide: true }
+  return { ...options, windowsHide: true } as any
 }
 
 // Remote displays (SSH X11 forwarding, VNC, RDP) make Chromium's GPU
@@ -1222,7 +1224,7 @@ function getBootstrapState() {
   return bootstrapState
 }
 
-function updateBootProgress(update, options = {}) {
+function updateBootProgress(update, options: {allowDecrease?: boolean} = {}) {
   const nextProgressRaw =
     typeof update.progress === 'number' ? clampBootProgress(update.progress) : bootProgressState.progress
 
@@ -1834,7 +1836,7 @@ function readDesktopUpdateConfig() {
 
 // Atomic file write: temp + rename (atomic on all platforms). Prevents
 // partial writes on crash/power loss that corrupt JSON config files.
-function writeFileAtomic(targetPath, data, encoding) {
+function writeFileAtomic(targetPath, data, encoding?: BufferEncoding) {
   const tmp = targetPath + '.tmp'
   fs.writeFileSync(tmp, data, encoding)
   fs.renameSync(tmp, targetPath)
@@ -1889,14 +1891,14 @@ function resolveUpdateRoot() {
   return candidates.find(c => directoryExists(path.join(c, '.git'))) || candidates[0] || ACTIVE_HERMES_ROOT
 }
 
-function runGit(args, options = {}) {
+function runGit(args, options: any = {}): Promise<{code: number, stdout: string, stderr: string}> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       resolveGitBinary(),
       IS_WINDOWS ? ['-c', 'windows.appendAtomically=false', ...args] : args,
       hiddenWindowsChildOptions({
         cwd: options.cwd,
-        env: { ...process.env, ...(options.env || {}), GIT_TERMINAL_PROMPT: '0' },
+        env: { ...process.env, ...(options.env || {}) as any, GIT_TERMINAL_PROMPT: '0' },
         stdio: ['ignore', 'pipe', 'pipe']
       })
     )
@@ -2476,7 +2478,7 @@ function resolveHermesCliBinary(updateRoot) {
 }
 
 // Spawn a command and stream each output line to the update progress channel.
-function runStreamedUpdate(command, args, { cwd, env, stage } = {}) {
+function runStreamedUpdate(command, args, { cwd, env, stage }: any = {}) {
   return new Promise(resolve => {
     let child
 
@@ -2530,7 +2532,7 @@ function shellQuote(value) {
 // (`hermes desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
-async function applyUpdatesPosixInApp() {
+async function applyUpdatesPosixInApp(opts: any) {
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
 
@@ -2543,7 +2545,7 @@ async function applyUpdatesPosixInApp() {
   // Put the Hermes-managed Node and the venv on PATH so `hermes desktop`'s
   // npm build can find them on a machine with no system Node. Windows portable
   // Node lives directly under %LOCALAPPDATA%\hermes\node, not node\bin.
-  const env = {
+  const env: Record<string, string> = {
     HERMES_HOME,
     PATH: pathWithHermesManagedNode(path.join(updateRoot, 'venv', 'bin'))
   }
@@ -2596,7 +2598,7 @@ async function applyUpdatesPosixInApp() {
     cwd: updateRoot,
     env,
     stage: 'update'
-  })
+  }) as any
 
   if (updated.code !== 0) {
     emitUpdateProgress({ stage: 'error', message: 'hermes update failed.', error: updated.error || 'update-failed' })
@@ -3047,7 +3049,7 @@ function writeDefaultProjectDir(dir) {
   }
 }
 
-function createPythonBackend(root, label, dashboardArgs, options = {}) {
+function createPythonBackend(root, label, dashboardArgs, options: any = {}) {
   const python = findPythonForRoot(root)
 
   if (!python) {return null}
@@ -3268,7 +3270,7 @@ async function ensureRuntime(backend) {
     rememberLog('[bootstrap] no Hermes install found; starting first-launch bootstrap')
 
     if (await handOffWindowsBootstrapRecovery('bootstrap-needed')) {
-      const handoffError = new Error(
+      const handoffError: Error & {isBootstrapFailure?: boolean, bootstrapHandedOff?: boolean} = new Error(
         'Hermes recovery was handed off to Hermes Setup. The desktop will restart when recovery completes.'
       )
 
@@ -3326,7 +3328,7 @@ async function ensureRuntime(backend) {
     bootstrapAbortController = null
 
     if (bootstrapResult.cancelled) {
-      const cancelledError = new Error('Hermes install was cancelled.')
+      const cancelledError = new Error('Hermes install was cancelled.') as any
       cancelledError.isBootstrapFailure = true
       cancelledError.bootstrapCancelled = true
       bootstrapFailure = cancelledError
@@ -3338,7 +3340,7 @@ async function ensureRuntime(backend) {
         `Hermes bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
           `${bootstrapResult.error || 'unknown error'}. ` +
           `Check ${path.join(HERMES_HOME, 'logs', 'desktop.log')} for the full transcript.`
-      )
+      ) as any
 
       bootstrapError.isBootstrapFailure = true
       bootstrapError.failedStage = bootstrapResult.failedStage || null
@@ -3412,7 +3414,7 @@ async function ensureRuntime(backend) {
   return applyWindowsNoConsoleSpawnHints(backend)
 }
 
-function fetchJson(url, token, options = {}) {
+function fetchJson(url, token, options: any = {}) {
   return new Promise((resolve, reject) => {
     const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
     const parsed = new URL(url)
@@ -3491,7 +3493,7 @@ function fetchJson(url, token, options = {}) {
   })
 }
 
-function fetchPublicJson(url, options = {}) {
+function fetchPublicJson(url, options: any = {}) {
   // Credential-free JSON GET/POST for public gateway endpoints
   // (``/api/status``, ``/api/auth/providers``). Unlike ``fetchJson`` it sends
   // NO ``X-Hermes-Session-Token`` header — used by the auth-mode probe before
@@ -3691,7 +3693,7 @@ function parseHtmlTitle(html) {
   return raw ? decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim() : ''
 }
 
-function fetchHtmlTitleWithCurl(rawUrl) {
+function fetchHtmlTitleWithCurl(rawUrl: string): Promise<string> {
   return new Promise(resolve => {
     const url = String(rawUrl || '').trim()
 
@@ -3824,7 +3826,7 @@ function runRenderTitleJob(rawUrl) {
   })
 }
 
-function fetchHtmlTitleWithRenderer(rawUrl) {
+function fetchHtmlTitleWithRenderer(rawUrl: string): Promise<string> {
   return new Promise(resolve => {
     renderTitleQueue.push({ resolve, url: rawUrl })
     dequeueRenderTitle()
@@ -3833,7 +3835,9 @@ function fetchHtmlTitleWithRenderer(rawUrl) {
 
 // Strips known error/captcha titles (e.g. "GetYourGuide – Error", "Just a
 // moment...") so they don't get cached as the resolved title.
-const usableTitle = value => (value && !TITLE_ERROR_RE.test(value) ? value : '')
+function usableTitle (value: string): string {
+  return (value && !TITLE_ERROR_RE.test(value) ? value : '')
+}
 
 function fetchLinkTitle(rawUrl) {
   const url = String(rawUrl || '').trim()
@@ -3912,7 +3916,7 @@ async function resourceBufferFromUrl(rawUrl) {
 }
 
 async function copyImageFromUrl(rawUrl) {
-  const { buffer } = await resourceBufferFromUrl(rawUrl)
+  const { buffer } = await resourceBufferFromUrl(rawUrl) as any
   const image = nativeImage.createFromBuffer(buffer)
 
   if (image.isEmpty()) {throw new Error('Could not read image')}
@@ -3920,7 +3924,7 @@ async function copyImageFromUrl(rawUrl) {
 }
 
 async function saveImageFromUrl(rawUrl) {
-  const { buffer, mimeType } = await resourceBufferFromUrl(rawUrl)
+  const { buffer, mimeType } = await resourceBufferFromUrl(rawUrl) as any
   const fallbackName = filenameFromUrl(rawUrl, `image${extensionForMimeType(mimeType) || '.png'}`)
 
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -4214,7 +4218,7 @@ function sendOpenUpdatesRequested() {
   mainWindow.focus()
 }
 
-function sendWindowStateChanged(nextIsFullscreen) {
+function sendWindowStateChanged(nextIsFullscreen?: boolean) {
   if (!mainWindow || mainWindow.isDestroyed()) {return}
   const { webContents } = mainWindow
 
@@ -4580,7 +4584,7 @@ function installMediaPermissions() {
   // the check defaults to false and the mic is denied before the request
   // handler ever runs.
   session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
-    if (permission === 'media' || permission === 'audioCapture') {
+    if (permission === 'media' || permission === 'audioCapture' as any /* todo: is this needed? */) {
       // details.mediaType is a single string here (not the mediaTypes array).
       const mediaType = details?.mediaType
 
@@ -4800,7 +4804,7 @@ function openOauthLoginWindow(baseUrl) {
 // JSON request routed through the OAuth session partition so the HttpOnly
 // session cookie is attached automatically by Electron's net stack. Used for
 // authed REST against a gated gateway, including minting WS tickets.
-function fetchJsonViaOauthSession(url, options = {}) {
+function fetchJsonViaOauthSession(url, options: any = {}) {
   return new Promise((resolve, reject) => {
     const sess = getOauthSession()
 
@@ -4835,7 +4839,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       session: sess,
       useSessionCookies: true,
       redirect: 'follow'
-    })
+    } as any)
 
     setJsonRequestHeaders(request)
 
@@ -4863,7 +4867,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
         const statusCode = res.statusCode || 500
 
         if (statusCode >= 400) {
-          const err = new Error(`${statusCode}: ${text || ''}`)
+          const err = new Error(`${statusCode}: ${text || ''}`) as any
           err.statusCode = statusCode
           reject(err)
 
@@ -4910,7 +4914,7 @@ async function mintGatewayWsTicket(baseUrl) {
   const body = await fetchJsonViaOauthSession(`${baseUrl}/api/auth/ws-ticket`, {
     method: 'POST',
     timeoutMs: 8_000
-  })
+  }) as any
 
   const ticket = body?.ticket
 
@@ -4975,7 +4979,7 @@ function decryptDesktopSecret(secret) {
 // Validate + normalize the per-profile remote overrides map read from disk.
 // Drops malformed names/entries and keeps only the recognized fields so a
 // hand-edited or stale connection.json can't inject junk into resolution.
-function sanitizeConnectionProfiles(raw) {
+function sanitizeConnectionProfiles(raw: Record<string, any>) {
   if (!raw || typeof raw !== 'object') {
     return {}
   }
@@ -4991,7 +4995,7 @@ function sanitizeConnectionProfiles(raw) {
       continue
     }
 
-    const cleaned = { mode: entry.mode === 'remote' ? 'remote' : 'local' }
+    const cleaned: {mode: 'remote' | 'local', url?: string, authMode?: string, token?: object } ={ mode: entry.mode === 'remote' ? 'remote' : 'local', }
     const url = String(entry.url || '').trim()
 
     if (url) {
@@ -5000,7 +5004,7 @@ function sanitizeConnectionProfiles(raw) {
 
     cleaned.authMode = normAuthMode(entry.authMode)
 
-    if (entry.token && typeof entry.token === 'object') {
+    if ((entry as any).token && typeof entry.token === 'object') {
       cleaned.token = entry.token
     }
 
@@ -5152,7 +5156,7 @@ function buildRemoteBlock(remoteUrl, authMode, token) {
   return { url: normalizeRemoteBaseUrl(remoteUrl), authMode, token }
 }
 
-function coerceDesktopConnectionConfig(input = {}, existing = readDesktopConnectionConfig(), options = {}) {
+function coerceDesktopConnectionConfig(input :any= {}, existing = readDesktopConnectionConfig(), options: any = {}) {
   const persistToken = options.persistToken !== false
   const key = connectionScopeKey(input.profile)
   const mode = input.mode === 'remote' ? 'remote' : 'local'
@@ -5214,7 +5218,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
       const err = new Error(
         'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
           'Open Settings → Gateway and click "Sign in", or switch back to Local.'
-      )
+      ) as any
 
       err.needsOauthLogin = true
       throw err
@@ -5227,7 +5231,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
     } catch (error) {
       const err = new Error(
         'Your remote gateway session has expired. ' + 'Open Settings → Gateway and click "Sign in" again.'
-      )
+      ) as any
 
       err.needsOauthLogin = true
       err.cause = error
@@ -5340,7 +5344,7 @@ async function fetchJsonForProfile(profile, path) {
 }
 
 // Issue an arbitrary method against a profile's resolved backend, parsed JSON.
-async function requestJsonForProfile(profile, path, method, body) {
+async function requestJsonForProfile(profile: string, path: string, method: Method, body?: string) {
   const conn = await ensureBackend(profile)
   const url = `${conn.baseUrl}${path}`
   const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
@@ -5367,7 +5371,7 @@ async function probeRemoteAuthMode(rawUrl) {
 
   try {
     status = await fetchPublicJson(`${baseUrl}/api/status`, { timeoutMs: 8_000 })
-  } catch (error) {
+  } catch (error: any) {
     return {
       baseUrl,
       reachable: false,
@@ -5388,7 +5392,7 @@ async function probeRemoteAuthMode(rawUrl) {
     // an OAuth-redirect one (``supports_password``). A failure here doesn't
     // change the auth mode, so swallow it.
     try {
-      const body = await fetchPublicJson(`${baseUrl}/api/auth/providers`, { timeoutMs: 8_000 })
+      const body = await fetchPublicJson(`${baseUrl}/api/auth/providers`, { timeoutMs: 8_000 }) as any
 
       if (Array.isArray(body?.providers)) {
         providers = body.providers
@@ -5415,7 +5419,7 @@ async function probeRemoteAuthMode(rawUrl) {
   }
 }
 
-async function testDesktopConnectionConfig(input = {}) {
+async function testDesktopConnectionConfig(input: any = {}) {
   const config = coerceDesktopConnectionConfig(input, readDesktopConnectionConfig(), { persistToken: false })
   const key = connectionScopeKey(input.profile)
   // The block under test: a per-profile entry or the global remote. Coerce has
@@ -5447,7 +5451,7 @@ async function testDesktopConnectionConfig(input = {}) {
     authMode = normAuthMode(remote.authMode)
   }
 
-  const status = await fetchJson(`${baseUrl}/api/status`, token, { timeoutMs: 8_000 })
+  const status = await fetchJson(`${baseUrl}/api/status`, token, { timeoutMs: 8_000 }) as any
 
   // The HTTP status check above proves the backend is reachable, but the chat
   // surface only works once the renderer's live WebSocket to ``/api/ws``
@@ -6111,7 +6115,7 @@ function focusWindow(win) {
   win.focus()
 }
 
-function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
+function spawnSecondaryWindow({ sessionId, watch, newSession }:{ sessionId?: string, watch?: boolean, newSession?: boolean } = {}) {
   const icon = getAppIconPath()
 
   const win = new BrowserWindow({
@@ -6145,9 +6149,7 @@ function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
     if (!win.isDestroyed()) {win.show()}
   })
 
-  win.on('will-enter-full-screen', () => sendWindowStateChanged(true))
   win.on('enter-full-screen', () => sendWindowStateChanged(true))
-  win.on('will-leave-full-screen', () => sendWindowStateChanged(false))
   win.on('leave-full-screen', () => sendWindowStateChanged(false))
 
   wireCommonWindowHandlers(win)
@@ -6873,7 +6875,7 @@ async function remoteSessionList(profile, searchParams) {
     s.is_default_profile = false
   }
 
-  return { ...data, sessions: rowsOf(data) }
+  return { ...(data as any), sessions: rowsOf(data) }
 }
 
 // Unified list: primary's local aggregate, with each remote profile's stale local
@@ -6890,7 +6892,7 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   const base = await fetchJson(`${primary.baseUrl}/api/profiles/sessions?${searchParams}`, primary.token, {
     method: 'GET',
     timeoutMs: DEFAULT_FETCH_TIMEOUT_MS
-  }).catch(() => ({ sessions: [], total: 0, profile_totals: {} }))
+  }).catch(() => ({ sessions: [], total: 0, profile_totals: {} })) as any
 
   // Over-fetch each remote from offset 0 (limit+offset rows) so the merged window
   // is correct for this page — mirrors the primary's per-profile over-fetch.
@@ -6924,7 +6926,7 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   const recency = s => s?.[order] ?? s?.started_at ?? 0
   merged.sort((a, b) => recency(b) - recency(a))
 
-  return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
+  return { ...(base as any), sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
 }
 
 ipcMain.handle('hermes:api', async (_event, request) => {
@@ -7043,7 +7045,7 @@ ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
   }
 })
 
-ipcMain.handle('hermes:selectPaths', async (_event, options = {}) => {
+ipcMain.handle('hermes:selectPaths', async (_event, options: any = {}) => {
   const properties = options?.directories ? ['openDirectory'] : ['openFile']
 
   if (options?.multiple !== false) {properties.push('multiSelections')}
@@ -7061,7 +7063,7 @@ ipcMain.handle('hermes:selectPaths', async (_event, options = {}) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: options?.title || 'Add context',
     defaultPath: resolvedDefaultPath,
-    properties,
+    properties: properties as any,
     filters: Array.isArray(options?.filters) ? options.filters : undefined
   })
 

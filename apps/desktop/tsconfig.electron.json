@@ -12,7 +12,7 @@
     "exactOptionalPropertyTypes": false,
     "ignoreDeprecations": "6.0",
     "composite": true,
-    "noEmit": false,
+    "noEmit": true,
     "emitDeclarationOnly": true,
     "declaration": true,
     "outDir": "build/electron-types"

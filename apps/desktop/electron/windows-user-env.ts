@@ -51,7 +51,9 @@ function expandWindowsEnvRefs(value, env = process.env) {
 // Read a User-scoped env var from HKCU\Environment. Windows-only: returns null
 // off-Windows (without spawning), on any spawn error, when `reg` exits non-zero
 // (the value doesn't exist), or when the value is empty.
-function readWindowsUserEnvVar(name, { platform = process.platform, env = process.env, exec = execFileSync } = {}) {
+function readWindowsUserEnvVar(name, { platform = process.platform, env = process.env, exec = execFileSync }: {
+  platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv, exec?: typeof execFileSync | ((file?: string, args?: any) => string)
+} = {}) {
   if (platform !== 'win32' || !name) {return null}
   let stdout
 

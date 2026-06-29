@@ -69,13 +69,13 @@ async function mapWithStatConcurrency(items, mapper) {
   }
 
   const workerCount = Math.min(FS_READDIR_STAT_CONCURRENCY, items.length)
-  const workers = Array.from({ length: workerCount }, () => runWorker())
+  const workers = Array.from({ length: workerCount } as any, () => runWorker())
   await Promise.all(workers)
 
   return results
 }
 
-async function readDirForIpc(dirPath, options = {}) {
+async function readDirForIpc(dirPath, options: any = {}) {
   const fsImpl = options.fs || fs
   let resolved
 

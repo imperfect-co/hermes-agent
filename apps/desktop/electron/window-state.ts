@@ -21,19 +21,26 @@ const MIN_VISIBLE = 48
 const finite = v => typeof v === 'number' && Number.isFinite(v)
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi))
 
+interface SanitizedWindowState{
+  width: number, height: number, isMaximized: boolean, x?: number,y?: number
+}
+
 // Parse raw JSON → clean state, or null if garbage. width/height are required
 // and floored; x/y survive only as a finite pair; isMaximized is strict.
-function sanitizeWindowState(raw) {
+function sanitizeWindowState(raw?: any): SanitizedWindowState | null
+
+
+ {
   if (!raw || typeof raw !== 'object' || !finite(raw.width) || !finite(raw.height)) {return null}
 
-  const state = {
+  const state: SanitizedWindowState = {
     width: Math.max(MIN_WIDTH, Math.round(raw.width)),
     height: Math.max(MIN_HEIGHT, Math.round(raw.height)),
-    isMaximized: raw.isMaximized === true
+    isMaximized: raw.isMaximized === true,
   }
 
   if (finite(raw.x) && finite(raw.y)) {
-    state.x = Math.round(raw.x)
+    state.x = Math.round(raw.x);
     state.y = Math.round(raw.y)
   }
 
@@ -54,12 +61,19 @@ function onScreen(bounds, displays) {
   })
 }
 
+interface WindowOptions {
+  width: number
+  height: number
+  x?: number
+  y?: number
+}
+
 // Sanitized state (or null) → BrowserWindow size/position options. Always sets
 // width/height, capped to the largest current display so a size saved on a
 // since-disconnected bigger monitor can't exceed any screen the user now has.
 // Sets x/y only when still on-screen; otherwise Electron centers the window.
-function computeWindowOptions(state, displays) {
-  const opts = {
+function computeWindowOptions(state, displays): WindowOptions {
+  const opts: WindowOptions = {
     width: finite(state?.width) ? state.width : DEFAULT_WIDTH,
     height: finite(state?.height) ? state.height : DEFAULT_HEIGHT
   }
@@ -83,7 +97,7 @@ function computeWindowOptions(state, displays) {
     finite(state.y) &&
     onScreen({ x: state.x, y: state.y, width: opts.width, height: opts.height }, displays)
   ) {
-    opts.x = state.x
+    opts.x = state.x;
     opts.y = state.y
   }
 

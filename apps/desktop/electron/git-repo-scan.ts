@@ -34,14 +34,14 @@ async function mapLimit(items, limit, fn) {
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) } as any, worker))
 }
 
 /**
  * Scan `roots` (default: the home dir) for git repositories. Returns deduped
  * `{ root, label }` entries. `options.maxDepth` caps recursion (default 3).
  */
-async function scanGitRepos(roots, options = {}) {
+async function scanGitRepos(roots, options: any = {}) {
   const maxDepth = Number(options.maxDepth) || DEFAULT_MAX_DEPTH
   const searchRoots = Array.isArray(roots) && roots.length > 0 ? roots : [os.homedir()]
   const found = new Map()

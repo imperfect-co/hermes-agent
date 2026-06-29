@@ -376,7 +376,7 @@ test('resolveTestWsUrl (oauth, mint FAILS) throws — must NOT skip WS validatio
           throw new Error('401 ticket mint failed')
         }
       }),
-    err => {
+    (err: any) => {
       // Actionable, points the user at re-auth, and preserves the cause + flag
       // the boot overlay uses to offer a sign-in prompt.
       assert.match(err.message, /WebSocket ticket/i)

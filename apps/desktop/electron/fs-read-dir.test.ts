@@ -11,7 +11,7 @@ function mkTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-fs-read-dir-'))
 }
 
-function fakeDirent(name, flags = {}) {
+function fakeDirent(name, flags: any = {}) {
   return {
     name,
     isDirectory: () => Boolean(flags.directory),
