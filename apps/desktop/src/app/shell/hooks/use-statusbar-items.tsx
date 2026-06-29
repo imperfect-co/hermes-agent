@@ -3,8 +3,8 @@ import { useCallback, useMemo } from 'react'
 
 import type { CommandCenterSection } from '@/app/command-center'
 import { $terminalTakeover, setTerminalTakeover } from '@/app/right-sidebar/store'
-import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
+import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
@@ -35,7 +35,7 @@ import {
 } from '@/store/updates'
 import type { StatusResponse } from '@/types/hermes'
 
-import { CRON_ROUTE } from '../../routes'
+import { CRON_ROUTE, LEARNING_ROUTE } from '../../routes'
 import type { StatusbarItem, StatusbarSelectModifiers } from '../statusbar-controls'
 
 interface StatusbarItemsOptions {
@@ -331,6 +331,14 @@ export function useStatusbarItems({
         title: copy.openCron,
         to: CRON_ROUTE,
         variant: 'action'
+      },
+      {
+        icon: <Codicon name="type-hierarchy" size="0.75rem" />,
+        id: 'learning',
+        label: copy.learning,
+        title: copy.openLearning,
+        to: LEARNING_ROUTE,
+        variant: 'action'
       }
     ],
     [
@@ -369,11 +377,7 @@ export function useStatusbarItems({
         menuAlign: 'end',
         menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
         menuContent: (
-          <ContextUsagePanel
-            currentUsage={currentUsage}
-            requestGateway={requestGateway}
-            sessionId={activeSessionId}
-          />
+          <ContextUsagePanel currentUsage={currentUsage} requestGateway={requestGateway} sessionId={activeSessionId} />
         ),
         title: copy.openContextUsage,
         variant: 'menu'
