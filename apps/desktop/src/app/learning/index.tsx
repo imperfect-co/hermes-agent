@@ -507,12 +507,14 @@ function StarMap({ graph }: { graph: LearningGraph }) {
       const ring = ringIdx != null ? (ringsRef.current[ringIdx] ?? null) : null
       const active = !!focus || !!ring
       ctx.lineWidth = 1 / vp.k
+      ctx.setLineDash([6 / vp.k, 5 / vp.k])
       ringsRef.current.forEach((rg, i) => {
         ctx.strokeStyle = shade(ringIdx === i ? 0.5 : active ? 0.24 : darkTheme ? 0.16 : 0.1)
         ctx.beginPath()
         ctx.arc(0, 0, rg.r, 0, Math.PI * 2)
         ctx.stroke()
       })
+      ctx.setLineDash([])
       ctx.strokeStyle = shade(active ? 0.13 : darkTheme ? 0.08 : 0.05)
 
       for (let i = 0; i < 6; i += 1) {
@@ -522,6 +524,14 @@ function StarMap({ graph }: { graph: LearningGraph }) {
         ctx.lineTo(Math.cos(a) * RING_OUTER, Math.sin(a) * RING_OUTER)
         ctx.stroke()
       }
+
+      // Switch to screen space for jump routes + glyphs (crisp, easy to trim).
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      // Jump routes. A focused node's links stop at its selection ring, not its
+      // glyph, so the ring reads cleanly.
+      const focusNode = focus ? (byId.get(focus) ?? null) : null
+      const focusRingR = focusNode ? (nodeRadius(focusNode) + focusNode.rec) * vp.k + 4 : 0
 
       for (const link of linksRef.current) {
         const s = typeof link.source === 'object' ? link.source : byId.get(String(link.source))
@@ -534,21 +544,37 @@ function StarMap({ graph }: { graph: LearningGraph }) {
         const lit =
           !!focus && (s.id === focus || t.id === focus || (!!focusSet && focusSet.has(s.id) && focusSet.has(t.id)))
 
+        let x1 = projX(s.x)
+        let y1 = projY(s.y)
+        let x2 = projX(t.x)
+        let y2 = projY(t.y)
+
+        if (s.id === focus) {
+          const d = Math.hypot(x2 - x1, y2 - y1) || 1
+          x1 += ((x2 - x1) / d) * focusRingR
+          y1 += ((y2 - y1) / d) * focusRingR
+        }
+
+        if (t.id === focus) {
+          const d = Math.hypot(x1 - x2, y1 - y2) || 1
+          x2 += ((x1 - x2) / d) * focusRingR
+          y2 += ((y1 - y2) / d) * focusRingR
+        }
+
         ctx.strokeStyle = lit ? shade(0.72) : shade(darkTheme ? 0.17 : 0.1)
-        ctx.lineWidth = (lit ? 1.6 : 0.85) / vp.k
+        ctx.lineWidth = lit ? 1.6 : 0.85
         ctx.beginPath()
-        ctx.moveTo(s.x, s.y)
-        ctx.lineTo(t.x, t.y)
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
         ctx.stroke()
       }
 
-      // Systems (nodes) — drawn in screen space so glyphs stay round + crisp,
-      // with recency burn: recent (outer) systems brighter, old (core) faint.
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      // Systems (nodes): opacity encodes recency — newest fully opaque, oldest
+      // faded toward a floor (eased), with a slight size bump for recent ones.
       ctx.fillStyle = shade(1)
 
       for (const n of nodes) {
-        const r = nodeRadius(n) * vp.k
+        const r = (nodeRadius(n) + n.rec) * vp.k
         const isFocus = n.id === focus
         const isNeighbor = !!focusSet && focusSet.has(n.id)
         const inRing = !!ring && Math.abs(n.rec - ring.ratio) <= 0.13
@@ -556,8 +582,8 @@ function StarMap({ graph }: { graph: LearningGraph }) {
         const sx = projX(n.x)
         const sy = projY(n.y)
 
-        // Stark: nodes are full-strength ink; only focus-dimming fades them.
-        ctx.globalAlpha = dim ? 0.16 : 1
+        const recAlpha = 0.35 + 0.65 * (1 - (1 - n.rec) ** 3)
+        ctx.globalAlpha = dim ? 0.16 : isFocus ? 1 : recAlpha
 
         if (n.kind === 'memory') {
           ctx.beginPath()
@@ -915,6 +941,7 @@ function StarMap({ graph }: { graph: LearningGraph }) {
     <div className="relative min-h-0 flex-1 overflow-hidden" ref={wrapRef}>
       <canvas
         className="block touch-none select-none text-foreground"
+        onDoubleClick={resetView}
         onMouseDown={onMouseDown}
         onMouseLeave={onMouseLeave}
         onMouseMove={onMouseMove}
