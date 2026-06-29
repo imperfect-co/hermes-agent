@@ -429,6 +429,47 @@ export interface UsageStats {
   total: number
 }
 
+/** One graph node in the learning graph (learned skill or memory chunk). */
+export interface LearningNode {
+  id: string
+  label: string
+  kind: 'memory' | 'skill'
+  memorySource?: 'memory' | 'profile'
+  timestamp?: null | number
+  category: string
+  useCount: number
+  state: string
+  createdBy: null | string
+  pinned: boolean
+}
+
+/** A declared `related_skills` link; both endpoints are guaranteed to be nodes. */
+export interface LearningEdge {
+  source: string
+  target: string
+}
+
+export interface LearningCluster {
+  category: string
+  count: number
+}
+
+/** Freeform memory rendered as a card — never a graph node. */
+export interface LearningMemoryCard {
+  source: 'memory' | 'profile'
+  timestamp?: null | number
+  title: string
+  body: string
+}
+
+export interface LearningGraph {
+  nodes: LearningNode[]
+  edges: LearningEdge[]
+  clusters: LearningCluster[]
+  memory: LearningMemoryCard[]
+  stats: Record<string, unknown>
+}
+
 export interface ContextUsageCategory {
   color: string
   id: string
