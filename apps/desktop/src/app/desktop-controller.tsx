@@ -158,6 +158,7 @@ const AgentsView = lazy(async () => ({ default: (await import('./agents')).Agent
 const ArtifactsView = lazy(async () => ({ default: (await import('./artifacts')).ArtifactsView }))
 const CommandCenterView = lazy(async () => ({ default: (await import('./command-center')).CommandCenterView }))
 const CronView = lazy(async () => ({ default: (await import('./cron')).CronView }))
+const LearningView = lazy(async () => ({ default: (await import('./learning')).LearningView }))
 const MessagingView = lazy(async () => ({ default: (await import('./messaging')).MessagingView }))
 const ProfilesView = lazy(async () => ({ default: (await import('./profiles')).ProfilesView }))
 const SettingsView = lazy(async () => ({ default: (await import('./settings')).SettingsView }))
@@ -258,6 +259,7 @@ export function DesktopController() {
     commandCenterOpen,
     cronOpen,
     currentView,
+    learningOpen,
     openAgents,
     openCommandCenterSection,
     profilesOpen,
@@ -1117,9 +1119,7 @@ export function DesktopController() {
   // layer) so pane resize handles still paint above it. Terminals own their state
   // (incl. a snapshotted cwd) independent of the session, so switching sessions
   // never rebuilds or closes them; toggling the pane never rebuilds the shells.
-  const mainOverlays = (
-    <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
-  )
+  const mainOverlays = <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
 
   const overlays = (
     <>
@@ -1199,6 +1199,12 @@ export function DesktopController() {
       {profilesOpen && (
         <Suspense fallback={null}>
           <ProfilesView onClose={closeOverlayToPreviousRoute} />
+        </Suspense>
+      )}
+
+      {learningOpen && (
+        <Suspense fallback={null}>
+          <LearningView onClose={closeOverlayToPreviousRoute} />
         </Suspense>
       )}
     </>
