@@ -2620,6 +2620,10 @@ class SlackAdapter(BasePlatformAdapter):
                     and not has_session
                 ):
                     return
+                # Active thread reply without a direct @mention — acknowledge
+                # the message with a +1 so the sender knows it was seen.
+                if is_thread_reply and self._reactions_enabled():
+                    await self._add_reaction(channel_id, ts, "+1")
 
         if is_mentioned:
             # Strip the bot mention from the text
