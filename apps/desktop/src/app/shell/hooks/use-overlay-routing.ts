@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { type CommandCenterSection } from '@/app/command-center'
-import { AGENTS_ROUTE, appViewForPath, COMMAND_CENTER_ROUTE, isOverlayView, NEW_CHAT_ROUTE } from '@/app/routes'
+import {
+  AGENTS_ROUTE,
+  appViewForPath,
+  COMMAND_CENTER_ROUTE,
+  isOverlayView,
+  LEARNING_ROUTE,
+  NEW_CHAT_ROUTE
+} from '@/app/routes'
 
 const SECTIONS = ['sessions', 'system', 'usage'] as const
 
@@ -14,6 +21,7 @@ export function useOverlayRouting() {
   const settingsOpen = currentView === 'settings'
   const commandCenterOpen = currentView === 'command-center'
   const agentsOpen = currentView === 'agents'
+  const learningOpen = currentView === 'learning'
   const cronOpen = currentView === 'cron'
   const profilesOpen = currentView === 'profiles'
   const chatOpen = currentView === 'chat'
@@ -53,6 +61,7 @@ export function useOverlayRouting() {
   }, [closeOverlayToPreviousRoute, commandCenterOpen, navigate])
 
   const openAgents = useCallback(() => navigate(AGENTS_ROUTE), [navigate])
+  const openLearning = useCallback(() => navigate(LEARNING_ROUTE), [navigate])
 
   return {
     agentsOpen,
@@ -62,8 +71,10 @@ export function useOverlayRouting() {
     commandCenterOpen,
     cronOpen,
     currentView,
+    learningOpen,
     openAgents,
     openCommandCenterSection,
+    openLearning,
     profilesOpen,
     settingsOpen,
     toggleCommandCenter
