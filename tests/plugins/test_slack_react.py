@@ -162,6 +162,18 @@ def test_whatsapp_skips_unmapped_shortcode(monkeypatch):
     assert adapter.calls == []
 
 
+def test_whatsapp_unmapped_directives_do_not_consume_cap(monkeypatch):
+    # Several unmapped shortcodes (no unicode) must not exhaust the fired-reaction
+    # budget and block a later valid one.
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    unmapped = "".join(f"[[react:nope{i}]]" for i in range(sr._MAX_REACTIONS_PER_RESPONSE + 2))
+    out = sr._transform_llm_output(platform="whatsapp", response_text=unmapped + "[[react:+1]] NO_REPLY")
+    assert out == "NO_REPLY"
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0]["emoji"] == "\U0001F44D"
+
+
 def test_whatsapp_group_passes_participant(monkeypatch):
     adapter = FakeWhatsAppAdapter()
     _patch_target(

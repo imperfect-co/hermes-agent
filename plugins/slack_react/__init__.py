@@ -229,16 +229,19 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
     count = 0
     seen = set()
     for raw in shortcodes:
-        name = raw.strip().strip(":").strip()
-        key = name.lower()
-        if not name or key in seen:
-            continue
-        if len(seen) >= _MAX_REACTIONS_PER_RESPONSE:
+        # Cap on reactions actually fired (not directives seen), so skipped
+        # ones — duplicates, or shortcodes with no WhatsApp unicode mapping —
+        # never consume the budget and block a later valid reaction.
+        if count >= _MAX_REACTIONS_PER_RESPONSE:
             logger.debug(
                 "slack_react: reaction limit (%d) reached; skipping the rest",
                 _MAX_REACTIONS_PER_RESPONSE,
             )
             break
+        name = raw.strip().strip(":").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
         seen.add(key)
 
         if platform == "slack":
