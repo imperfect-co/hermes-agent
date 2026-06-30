@@ -1,8 +1,11 @@
 """Tests for configurable background process notification modes.
 
-The gateway process watcher pushes status updates to users' chats when
-background terminal commands run.  ``display.background_process_notifications``
-controls verbosity: off | result | error | all (default).
+When a background terminal command finishes, the gateway process watcher
+narrates the completion back into the user's chat by re-injecting a synthetic
+internal event (handle_message) that the agent retells in its own voice —
+instead of pushing a raw "[Background process …]" bracket string via
+adapter.send.  ``display.background_process_notifications`` still controls
+verbosity: off | result | error | all (default).
 
 Contributed by @PeterFile (PR #593), reimplemented on current main.
 """
@@ -57,6 +60,9 @@ def _watcher_dict(session_id="proc_test", thread_id=""):
     d = {
         "session_id": session_id,
         "check_interval": 0,
+        # session_key lets _build_process_event_source resolve a routing source
+        # for the narrated injection (chat_type is derived from the key).
+        "session_key": "agent:main:telegram:dm:123",
         "platform": "telegram",
         "chat_id": "123",
     }
@@ -120,17 +126,19 @@ class TestLoadBackgroundNotificationsMode:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "sessions", "expected_calls", "expected_fragment"),
+    ("mode", "sessions", "expected_injections", "expected_fragment"),
     [
-        # all mode: running output → sends update
+        # all mode: running output → no notification. The periodic
+        # "[Background process … is still running~]" bracket push was removed;
+        # only completion notifies now.
         (
             "all",
             [
                 SimpleNamespace(output_buffer="building...\n", exited=False, exit_code=None),
                 None,  # process disappears → watcher exits
             ],
-            1,
-            "is still running",
+            0,
+            None,
         ),
         # result mode: running output → no update
         (
@@ -149,12 +157,12 @@ class TestLoadBackgroundNotificationsMode:
             0,
             None,
         ),
-        # result mode: exited → notifies
+        # result mode: exited → narrates completion via injection
         (
             "result",
             [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)],
             1,
-            "finished with exit code 0",
+            "exit code 0",
         ),
         # error mode: exit 0 → no notification
         (
@@ -163,24 +171,24 @@ class TestLoadBackgroundNotificationsMode:
             0,
             None,
         ),
-        # error mode: exit 1 → notifies
+        # error mode: exit 1 → narrates completion via injection
         (
             "error",
             [SimpleNamespace(output_buffer="traceback\n", exited=True, exit_code=1)],
             1,
-            "finished with exit code 1",
+            "exit code 1",
         ),
-        # all mode: exited → notifies
+        # all mode: exited → narrates completion via injection
         (
             "all",
             [SimpleNamespace(output_buffer="ok\n", exited=True, exit_code=0)],
             1,
-            "finished with exit code 0",
+            "exit code 0",
         ),
     ],
 )
 async def test_run_process_watcher_respects_notification_mode(
-    monkeypatch, tmp_path, mode, sessions, expected_calls, expected_fragment
+    monkeypatch, tmp_path, mode, sessions, expected_injections, expected_fragment
 ):
     import tools.process_registry as pr_module
 
@@ -196,17 +204,25 @@ async def test_run_process_watcher_respects_notification_mode(
 
     await runner._run_process_watcher(_watcher_dict())
 
-    assert adapter.send.await_count == expected_calls, (
-        f"mode={mode}: expected {expected_calls} sends, got {adapter.send.await_count}"
+    # Completions are narrated by re-injecting a synthetic internal event
+    # (handle_message), never pushed as a raw "[Background process …]" bracket
+    # string via adapter.send.
+    assert adapter.send.await_count == 0, (
+        f"mode={mode}: completion must not be raw-pushed via adapter.send"
+    )
+    assert adapter.handle_message.await_count == expected_injections, (
+        f"mode={mode}: expected {expected_injections} injected notifications, "
+        f"got {adapter.handle_message.await_count}"
     )
     if expected_fragment is not None:
-        sent_message = adapter.send.await_args.args[1]
-        assert expected_fragment in sent_message
+        synth_event = adapter.handle_message.await_args.args[0]
+        assert synth_event.internal is True
+        assert expected_fragment in synth_event.text
 
 
 @pytest.mark.asyncio
-async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
-    """thread_id from watcher dict is forwarded as metadata to adapter.send()."""
+async def test_thread_id_flows_into_injected_event(monkeypatch, tmp_path):
+    """thread_id from the watcher dict rides into the injected event's source."""
     import tools.process_registry as pr_module
 
     sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
@@ -221,14 +237,15 @@ async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
 
     await runner._run_process_watcher(_watcher_dict(thread_id="42"))
 
-    assert adapter.send.await_count == 1
-    _, kwargs = adapter.send.call_args
-    assert kwargs["metadata"] == {"thread_id": "42"}
+    assert adapter.send.await_count == 0
+    adapter.handle_message.assert_awaited_once()
+    synth_event = adapter.handle_message.await_args.args[0]
+    assert synth_event.source.thread_id == "42"
 
 
 @pytest.mark.asyncio
-async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
-    """When thread_id is empty, metadata should be None (general topic)."""
+async def test_no_thread_id_injects_without_thread(monkeypatch, tmp_path):
+    """When thread_id is empty, the injected event carries no thread (general topic)."""
     import tools.process_registry as pr_module
 
     sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0)]
@@ -243,9 +260,10 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
 
     await runner._run_process_watcher(_watcher_dict())
 
-    assert adapter.send.await_count == 1
-    _, kwargs = adapter.send.call_args
-    assert kwargs["metadata"] is None
+    assert adapter.send.await_count == 0
+    adapter.handle_message.assert_awaited_once()
+    synth_event = adapter.handle_message.await_args.args[0]
+    assert synth_event.source.thread_id is None
 
 
 @pytest.mark.asyncio
