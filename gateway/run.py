@@ -11845,8 +11845,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         native_trigger = False
         if self._native_audio_out_enabled():
-            from tools.voice_reply import user_requested_spoken_reply
-            native_trigger = is_voice_input or user_requested_spoken_reply(event.text)
+            try:
+                from tools.voice_reply import user_requested_spoken_reply
+
+                native_trigger = is_voice_input or user_requested_spoken_reply(event.text)
+            except Exception as exc:  # never let policy resolution crash the turn loop
+                logger.warning("Failed to resolve selection policy: %s", exc)
+                native_trigger = False
 
         legacy_trigger = (
             (voice_mode == "all")
