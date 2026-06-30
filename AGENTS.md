@@ -221,6 +221,67 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## Git Fork Management & Worktrees
+
+This repo is a **fork**. Two remotes, two roles — keep them straight:
+
+| Remote | Repo | Role |
+|---|---|---|
+| `origin` | `imperfect-co/hermes-agent` | **Our fork — the deploy source of truth.** All branches, PRs, pulls, and pushes target `origin`. |
+| `upstream` | `NousResearch/hermes-agent` | The canonical project. **Read-only for us** — we *fetch* from it to sync and **never push to it**. |
+
+`origin/main` is `upstream/main` **plus** imperfect-co's customizations; the two
+diverge on purpose. The daily **`.github/workflows/sync-upstream.yml`** workflow
+merges `upstream/main` into `origin/main` so the gap — and any future merge
+conflict — stays small.
+
+### Always work in a linked worktree — never the primary `main` checkout
+
+The primary checkout's `main` is the **deploy checkout**: the daemon/gateway
+runs from it and deploys `git pull` it. **Uncommitted edits there make `git pull`
+refuse to fast-forward** (`Your local changes would be overwritten by merge`) —
+i.e. an agent editing files in place silently locks the next deploy. So coding
+agents (Claude included) **must not edit files in the primary checkout**
+(`~/hermes-agent`). Spin up a linked worktree on a feature branch and work there:
+
+```bash
+git -C ~/hermes-agent fetch origin
+git -C ~/hermes-agent worktree add -b fix/my-change ../hermes-agent-my-change origin/main
+cd ../hermes-agent-my-change
+# ...edit, test (scripts/run_tests.sh), commit...
+git push -u origin fix/my-change          # opens against origin
+git -C ~/hermes-agent worktree remove ../hermes-agent-my-change   # when the branch lands
+```
+
+One worktree per task; remove it when the branch lands. Worktrees share the
+primary checkout's `.git` and (per `scripts/run_tests.sh`) its venv, so setup is
+cheap. Branch off `origin/main`, PR against `origin/main`, and let CI/review land
+it — **never commit straight to `main`.**
+
+### Pulling and pushing always target `origin/main`
+
+- **Local `main` must track `origin/main`, not `upstream/main`** — tracking
+  upstream is what makes `git pull` drag in unreviewed upstream commits and
+  diverge the deploy checkout. Fix a mis-tracked checkout once:
+  ```bash
+  git branch --set-upstream-to=origin/main main
+  ```
+- **Stash (or commit) before you pull** — a dirty tree blocks the pull:
+  ```bash
+  git stash push -u -m wip
+  git pull --ff-only origin main
+  git stash pop
+  ```
+  Use `--ff-only` on the deploy checkout so a pull never silently writes a merge
+  commit onto `main`; if it refuses, you have local commits on `main` that belong
+  on a branch (move them, then pull).
+- **Never push to `upstream`.** Pushes go to `origin` only. Pulling
+  `upstream`'s changes into our fork is the `sync-upstream` workflow's job — or,
+  by hand from a clean checkout:
+  ```bash
+  git fetch upstream && git merge --no-edit upstream/main && git push origin main
+  ```
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
