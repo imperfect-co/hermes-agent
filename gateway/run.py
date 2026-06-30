@@ -17489,7 +17489,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         ):
             _NOTIFY_INTERVAL = None
-        _notify_start = time.time()
+        # Monotonic: the heartbeat measures elapsed turn duration, so it must
+        # not regress if the wall clock steps backward (NTP / manual change).
+        _notify_start = time.monotonic()
 
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
@@ -17536,10 +17538,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # time. Deliberately omits the iteration/tool detail —
                     # staying quiet is the whole point.
                     _heartbeat_text = quiet_heartbeat_text(
-                        time.time() - _notify_start
+                        time.monotonic() - _notify_start
                     )
                 else:
-                    _elapsed_mins = int((time.time() - _notify_start) // 60)
+                    _elapsed_mins = int((time.monotonic() - _notify_start) // 60)
                     # Include agent activity context if available. Default
                     # heartbeat is terse: elapsed + current tool. Verbose
                     # iteration counter is gated on busy_ack_detail so users
