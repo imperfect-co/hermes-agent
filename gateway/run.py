@@ -11896,6 +11896,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await adapter.handle_message(event)
 
+    def _native_audio_out_enabled(self) -> bool:
+        """Whether native audio output (ADR 0024) is enabled via config.
+
+        Reads ``voice.native_audio_out`` from config.yaml fresh each call so a
+        config reload takes effect without a restart.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_full_config
+            _cfg = _load_full_config()
+            return bool((_cfg.get("voice") or {}).get("native_audio_out", False))
+        except Exception:
+            return False
+
+    def _native_audio_out_render_config(self) -> tuple:
+        """Return ``(voice_name, gemini_tts_config)`` for native audio output."""
+        voice = "Charon"
+        gemini_cfg: Dict[str, Any] = {}
+        try:
+            from hermes_cli.config import load_config as _load_full_config
+            _cfg = _load_full_config()
+            voice = str(
+                (_cfg.get("voice") or {}).get("native_audio_voice") or "Charon"
+            ).strip() or "Charon"
+            raw = (_cfg.get("tts") or {}).get("gemini") or {}
+            if isinstance(raw, dict):
+                gemini_cfg = dict(raw)
+        except Exception:
+            pass
+        return voice, gemini_cfg
+
     def _should_send_voice_reply(
         self,
         event: MessageEvent,
@@ -11905,14 +11935,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> bool:
         """Decide whether the runner should send a TTS voice reply.
 
+        Two selection policies are OR'd together:
+
+        - Native audio output (ADR 0024), when ``voice.native_audio_out`` is on:
+          speak iff the inbound message was a voice note OR the user explicitly
+          asked for a spoken reply in text. Independent of the /voice toggle.
+        - Legacy /voice toggle: ``voice_mode`` ``all`` (always) or
+          ``voice_only`` (only when the inbound was a voice note).
+
         Returns False when:
-        - voice_mode is off for this chat
         - response is empty or an error
-        - agent already called text_to_speech tool (dedup)
+        - neither policy selects a spoken reply
+        - agent already called the text_to_speech tool (dedup)
         - voice input and base adapter auto-TTS already handled it (skip_double)
-          UNLESS streaming already consumed the response (already_sent=True),
-          in which case the base adapter won't have text for auto-TTS so the
-          runner must handle it.
+          UNLESS streaming already consumed the response (already_sent=True) or
+          the native path is the trigger (the base adapter does not handle it),
+          in which case the runner must take over.
         """
         if not response or response.startswith("Error:"):
             return False
@@ -11921,11 +11959,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
         is_voice_input = (event.message_type == MessageType.VOICE)
 
-        should = (
+        native_trigger = False
+        if self._native_audio_out_enabled():
+            try:
+                from tools.voice_reply import user_requested_spoken_reply
+
+                native_trigger = is_voice_input or user_requested_spoken_reply(event.text)
+            except Exception as exc:  # never let policy resolution crash the turn loop
+                logger.warning("Failed to resolve selection policy: %s", exc)
+                native_trigger = False
+
+        legacy_trigger = (
             (voice_mode == "all")
             or (voice_mode == "voice_only" and is_voice_input)
         )
-        if not should:
+        if not (native_trigger or legacy_trigger):
             return False
 
         # Dedup: agent already called TTS tool
@@ -11944,14 +11992,112 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # (play_tts plays in VC when connected, so runner can skip).
         # When streaming already delivered the text (already_sent=True),
         # the base adapter will receive None and can't run auto-TTS,
-        # so the runner must take over.
-        if is_voice_input and not already_sent:
+        # so the runner must take over. The native audio output path is never
+        # handled by the base adapter, so skip this guard when it is the trigger.
+        if is_voice_input and not already_sent and not native_trigger:
             return False
 
         return True
 
+    async def _deliver_voice_audio(self, event: MessageEvent, audio_path: str) -> None:
+        """Deliver a rendered audio file as a voice message.
+
+        Plays into a connected voice channel when available, otherwise hands the
+        file to the platform adapter's ``send_voice``. Shared by the legacy TTS
+        reply and the native audio output (ADR 0024) reply paths.
+        """
+        adapter = self.adapters.get(event.source.platform)
+
+        # If connected to a voice channel, play there instead of sending a file
+        guild_id = self._get_guild_id(event)
+        if (guild_id
+                and hasattr(adapter, "play_in_voice_channel")
+                and hasattr(adapter, "is_in_voice_channel")
+                and adapter.is_in_voice_channel(guild_id)):
+            await adapter.play_in_voice_channel(guild_id, audio_path)
+        elif adapter and hasattr(adapter, "send_voice"):
+            reply_anchor = self._reply_anchor_for_event(event)
+            thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+            # Mark the voice reply as notify-worthy.  Mirrors the final-text
+            # path in gateway/platforms/base.py which sets ``notify=True`` so
+            # platform adapters that gate push notifications (Telegram
+            # "important" mode) deliver the final voice reply as a normal
+            # notification instead of a silent message.  Clone first so we
+            # don't mutate metadata shared with concurrent typing-indicator
+            # state.
+            if thread_meta is not None:
+                thread_meta = dict(thread_meta)
+                thread_meta["notify"] = True
+            else:
+                thread_meta = {"notify": True}
+            send_kwargs: Dict[str, Any] = {
+                "chat_id": event.source.chat_id,
+                "audio_path": audio_path,
+                "reply_to": reply_anchor,
+                "metadata": thread_meta,
+            }
+            await adapter.send_voice(**send_kwargs)
+
+    async def _send_native_voice_note(self, event: MessageEvent, text: str) -> None:
+        """ADR 0024 Phase 1: render the reply as an opus voice note and deliver it.
+
+        Compose-then-render: the brain already wrote ``text``; here we render it
+        to an opus-in-ogg voice note (Gemini TTS, ``Charon``, locale-aware) and
+        deliver it as a first-class structured part. On render failure we log
+        loud and return — the plain text reply is delivered by the normal path,
+        so the user still gets the answer (fail-loud fallback).
+        """
+        import uuid as _uuid
+        from tools.tts_tool import _strip_markdown_for_tts
+        from tools.voice_reply import render_voice_note, VoiceRenderError
+
+        tts_text = _strip_markdown_for_tts(text[:4000])
+        if not tts_text:
+            return
+
+        out_path = os.path.join(
+            tempfile.gettempdir(), "hermes_voice",
+            f"native_reply_{_uuid.uuid4().hex[:12]}.ogg",
+        )
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        voice, gemini_cfg = self._native_audio_out_render_config()
+
+        part = None
+        try:
+            part = await asyncio.to_thread(
+                render_voice_note,
+                tts_text,
+                out_path,
+                voice=voice,
+                base_gemini_config=gemini_cfg,
+            )
+            await self._deliver_voice_audio(event, part.path)
+        except VoiceRenderError as e:
+            logger.warning(
+                "native_audio_out: voice render failed; falling back to text reply: %s", e
+            )
+        except Exception as e:
+            logger.warning(
+                "native_audio_out: voice delivery failed: %s", e, exc_info=True
+            )
+        finally:
+            cleanup = {out_path}
+            if part is not None:
+                cleanup.add(part.path)
+            for p in cleanup:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
+        # Native audio output (ADR 0024) supersedes the legacy provider-agnostic
+        # TTS path when enabled.
+        if self._native_audio_out_enabled():
+            await self._send_native_voice_note(event, text)
+            return
+
         import uuid as _uuid
         audio_path = None
         actual_path = None
@@ -11986,37 +12132,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
                 return
 
-            adapter = self.adapters.get(event.source.platform)
-
-            # If connected to a voice channel, play there instead of sending a file
-            guild_id = self._get_guild_id(event)
-            if (guild_id
-                    and hasattr(adapter, "play_in_voice_channel")
-                    and hasattr(adapter, "is_in_voice_channel")
-                    and adapter.is_in_voice_channel(guild_id)):
-                await adapter.play_in_voice_channel(guild_id, actual_path)
-            elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-                # Mark the auto voice reply as notify-worthy.  Mirrors the
-                # final-text path in gateway/platforms/base.py which sets
-                # ``notify=True`` so platform adapters that gate push
-                # notifications (Telegram "important" mode) deliver the
-                # final voice reply as a normal notification instead of a
-                # silent message.  Clone first so we don't mutate metadata
-                # shared with concurrent typing-indicator state.
-                if thread_meta is not None:
-                    thread_meta = dict(thread_meta)
-                    thread_meta["notify"] = True
-                else:
-                    thread_meta = {"notify": True}
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": event.source.chat_id,
-                    "audio_path": actual_path,
-                    "reply_to": reply_anchor,
-                    "metadata": thread_meta,
-                }
-                await adapter.send_voice(**send_kwargs)
+            await self._deliver_voice_audio(event, actual_path)
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
         finally:

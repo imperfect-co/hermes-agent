@@ -199,6 +199,10 @@ DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_GEMINI_AUDIO_TAGS = False
+# Gemini 2.5/3.x are thinking models; with the default (non-zero) thinking
+# budget the TTS endpoint can spend the whole response on a thinking turn and
+# return zero audio parts. Pin the budget to 0 so every token is spoken.
+DEFAULT_GEMINI_TTS_THINKING_BUDGET = 0
 GEMINI_AUDIO_TAG_REWRITE_TASK = "tts_audio_tags"
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
@@ -1534,6 +1538,22 @@ def _gemini_model_supports_audio_tags(model: str) -> bool:
     return "gemini-3.1" in normalized and "tts" in normalized
 
 
+def _gemini_model_supports_thinking(model: str) -> bool:
+    """Whether a Gemini TTS model accepts ``generationConfig.thinkingConfig``.
+
+    The 2.5 preview TTS endpoint rejects ``thinkingConfig`` outright (HTTP 400
+    "Thinking is not enabled for models/gemini-2.5-flash-preview-tts"), so the
+    field must be omitted there. The gemini-3.x TTS line *are* thinking models
+    that can otherwise spend the whole turn thinking and return no audio — those
+    get an explicit ``thinkingBudget`` (default 0) to force spoken output.
+    """
+    normalized = (model or "").strip().lower().rsplit("/", 1)[-1]
+    if "tts" not in normalized:
+        return False
+    match = re.search(r"gemini-(\d+)", normalized)
+    return bool(match) and int(match.group(1)) >= 3
+
+
 def _gemini_audio_tags_enabled(gemini_config: Dict[str, Any], model: str) -> bool:
     raw = gemini_config.get("audio_tags")
     if isinstance(raw, dict):
@@ -1678,6 +1698,14 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     gemini_config = raw_gemini_config if isinstance(raw_gemini_config, dict) else {}
     model = str(gemini_config.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
     voice = str(gemini_config.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
+    # BCP-47 locale (e.g. "es-ES", "en-US"). Empty => let Gemini infer from text.
+    language_code = str(gemini_config.get("language_code", "") or "").strip()
+    try:
+        thinking_budget = int(
+            gemini_config.get("thinking_budget", DEFAULT_GEMINI_TTS_THINKING_BUDGET)
+        )
+    except (TypeError, ValueError):
+        thinking_budget = DEFAULT_GEMINI_TTS_THINKING_BUDGET
     base_url = str(
         gemini_config.get("base_url")
         or get_env_value("GEMINI_BASE_URL")
@@ -1700,16 +1728,28 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         )
         prompt_text = prompt_text[:max_len]
 
+    speech_config: Dict[str, Any] = {
+        "voiceConfig": {
+            "prebuiltVoiceConfig": {"voiceName": voice},
+        },
+    }
+    if language_code:
+        # languageCode pins the spoken locale so e.g. Spanish text is not read
+        # with an English ("gringo") accent.
+        speech_config["languageCode"] = language_code
+
+    generation_config: Dict[str, Any] = {
+        "responseModalities": ["AUDIO"],
+        "speechConfig": speech_config,
+    }
+    if _gemini_model_supports_thinking(model):
+        # Thinking TTS models otherwise risk returning an empty audio response;
+        # non-thinking models (e.g. 2.5-flash-preview-tts) reject this field.
+        generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
     payload: Dict[str, Any] = {
         "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": voice},
-                },
-            },
-        },
+        "generationConfig": generation_config,
     }
 
     endpoint = f"{base_url}/models/{model}:generateContent"
