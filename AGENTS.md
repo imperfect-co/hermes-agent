@@ -245,12 +245,17 @@ agents (Claude included) **must not edit files in the primary checkout**
 (`~/hermes-agent`). Spin up a linked worktree on a feature branch and work there:
 
 ```bash
+# Anchor the worktree to one explicit, absolute path so every command below
+# resolves to the same place regardless of your shell's current directory
+# (git -C changes git's dir, not the shell's, so relative paths would drift).
+wt="$HOME/hermes-agent-my-change"
 git -C ~/hermes-agent fetch origin
-git -C ~/hermes-agent worktree add -b fix/my-change ../hermes-agent-my-change origin/main
-cd ../hermes-agent-my-change
+git -C ~/hermes-agent worktree add -b fix/my-change "$wt" origin/main
+cd "$wt"
 # ...edit, test (scripts/run_tests.sh), commit...
 git push -u origin fix/my-change          # opens against origin
-git -C ~/hermes-agent worktree remove ../hermes-agent-my-change   # when the branch lands
+# when the branch lands: step OUT of the worktree first, then remove it by path
+cd ~/hermes-agent && git worktree remove "$wt"
 ```
 
 One worktree per task; remove it when the branch lands. Worktrees share the
