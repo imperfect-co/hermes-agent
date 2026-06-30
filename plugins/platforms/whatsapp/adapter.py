@@ -913,6 +913,55 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def send_reaction(
+        self,
+        chat_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        from_me: bool = False,
+        participant: Optional[str] = None,
+    ) -> SendResult:
+        """React to a message via the WhatsApp bridge.
+
+        ``emoji`` must be a literal unicode emoji (e.g. ``"👍"``), not a Slack
+        shortcode — Baileys' ``react`` payload takes the rendered character.
+        Passing an empty string removes a previously-sent reaction.
+
+        The bridge rebuilds the Baileys message key from ``message_id`` +
+        ``chat_id`` (remoteJid). For a group message, pass ``participant`` (the
+        sender JID) so the key routes correctly; for a DM it is omitted. Set
+        ``from_me`` only when reacting to a message the bot itself sent.
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        if not message_id:
+            return SendResult(success=False, error="message_id is required")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        try:
+            import aiohttp
+            payload: Dict[str, Any] = {
+                "chatId": to_whatsapp_jid(chat_id),
+                "messageId": message_id,
+                "emoji": emoji,
+                "fromMe": bool(from_me),
+            }
+            if participant:
+                payload["participant"] = to_whatsapp_jid(participant)
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/react",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    return SendResult(success=True, message_id=message_id)
+                error = await resp.text()
+                return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def _send_media_to_bridge(
         self,
         chat_id: str,
@@ -1206,6 +1255,9 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 chat_type=chat_type,
                 user_id=data.get("senderId"),
                 user_name=data.get("senderName"),
+                # Anchor the triggering message id so reply/react features can
+                # target this turn's message (via HERMES_SESSION_MESSAGE_ID).
+                message_id=data.get("messageId"),
             )
             
             # Download media URLs to the local cache so agent tools

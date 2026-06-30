@@ -1,0 +1,318 @@
+"""slack_react — emoji reactions for Slack and WhatsApp.
+
+Problem
+-------
+When someone sends a lightweight message ("thanks!", "issue fixed", "lgtm") the
+bot always spins up a normal text-reply turn. The natural response is a single
+emoji reaction and *no* text. This plugin gives the model that option on Slack
+and WhatsApp.
+
+How it works
+------------
+Two stock hooks:
+
+1. ``pre_llm_call`` — on Slack/WhatsApp turns, inject a short *policy* teaching
+   the model the ``[[react:EMOJI]]`` control directive and when a reaction alone
+   is enough. The model decides; the plugin only supplies the vocabulary.
+
+2. ``transform_llm_output`` — after the model replies, scan for
+   ``[[react:EMOJI]]`` directives, fire the platform's native reaction on the
+   message that triggered this turn, strip the directives, and return either:
+     * the cleaned text (react **and** reply), or
+     * the literal ``NO_REPLY`` (react **instead of** reply). ``NO_REPLY`` is the
+       gateway's built-in intentional-silence token
+       (``gateway/response_filters.py``), so no text message is sent.
+
+The triggering message is resolved from the per-turn session context vars
+``HERMES_SESSION_CHAT_ID`` / ``HERMES_SESSION_MESSAGE_ID`` (set by the gateway
+from the *current* turn's source — not the session origin, which is fixed at
+session creation). Delivery reuses the live adapter on the gateway runner:
+Slack's ``_add_reaction`` (``reactions.add``) or WhatsApp's ``send_reaction``
+(Baileys ``react``). WhatsApp's API needs a literal unicode emoji, so Slack
+shortcodes are mapped via ``_SHORTCODE_TO_UNICODE``.
+
+Because the hook runs in a gateway worker thread while the WhatsApp adapter's
+HTTP session is bound to the gateway event loop, reaction coroutines are
+scheduled back onto that loop via ``safe_schedule_threadsafe``; a private-loop
+fallback keeps CLI/test contexts working.
+
+Enable in ``~/.hermes/config.yaml``::
+
+    plugins:
+      enabled:
+        - slack_react
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any, Callable, List, Optional
+
+logger = logging.getLogger("hermes.plugins.slack_react")
+
+# Matches [[react:EMOJI]] — EMOJI is a shortcode, with or without the
+# surrounding colons (e.g. "+1", ":+1:", "white_check_mark", "tada").
+_DIRECTIVE_RE = re.compile(
+    r"\[\[\s*react\s*:\s*:?([a-zA-Z0-9_+\-]+):?\s*\]\]",
+    re.IGNORECASE,
+)
+
+# The gateway's canonical "say nothing" token. Kept in sync with
+# gateway/response_filters.py::SILENT_REPLY_TOKEN.
+_SILENT_TOKEN = "NO_REPLY"
+
+# Platforms this plugin reacts on. Both expose a per-turn message id via the
+# session context vars and a live adapter with a reaction method.
+_SUPPORTED_PLATFORMS = ("slack", "whatsapp")
+
+# WhatsApp's Baileys `react` payload takes a literal unicode emoji, not a Slack
+# shortcode. Map the shortcodes advertised in the policy (plus a few common
+# extras) so one directive vocabulary works across both platforms. Unmapped
+# shortcodes are skipped on WhatsApp (Slack takes them verbatim).
+_SHORTCODE_TO_UNICODE = {
+    "+1": "\U0001F44D",            # 👍
+    "thumbsup": "\U0001F44D",      # 👍
+    "-1": "\U0001F44E",            # 👎
+    "thumbsdown": "\U0001F44E",    # 👎
+    "tada": "\U0001F389",          # 🎉
+    "eyes": "\U0001F440",          # 👀
+    "white_check_mark": "✅",  # ✅
+    "heavy_check_mark": "✔️",  # ✔️
+    "raised_hands": "\U0001F64C",  # 🙌
+    "pray": "\U0001F64F",          # 🙏
+    "heart": "❤️",       # ❤️
+    "fire": "\U0001F525",          # 🔥
+    "100": "\U0001F4AF",           # 💯
+    "rocket": "\U0001F680",        # 🚀
+    "ok_hand": "\U0001F44C",       # 👌
+    "clap": "\U0001F44F",          # 👏
+    "thinking_face": "\U0001F914",  # 🤔
+    "joy": "\U0001F602",           # 😂
+}
+
+
+def _resolve_platform(raw: Any) -> Optional[str]:
+    """Normalize the turn's platform to 'slack'/'whatsapp', or None if neither.
+
+    ``raw`` may be a plain string or a Platform enum; match leniently on value.
+    """
+    if raw is None:
+        return None
+    val = getattr(raw, "value", raw)
+    val = str(val).strip().lower()
+    return val if val in _SUPPORTED_PLATFORMS else None
+
+
+def _policy(platform: str) -> str:
+    """The reaction policy injected into the turn, tailored to the platform."""
+    where = "WhatsApp" if platform == "whatsapp" else "Slack"
+    return (
+        f"Emoji reaction policy (this turn is on {where}):\n"
+        "- For a message that only needs a lightweight acknowledgement — e.g. "
+        '"thanks", "ok", "done", "issue fixed", "lgtm", a \U0001F44D, or '
+        "similar — prefer reacting with an emoji over writing a text reply.\n"
+        "- To react, put a control directive `[[react:EMOJI]]` anywhere in your "
+        "response, where EMOJI is an emoji shortcode WITHOUT colons "
+        "(e.g. +1, tada, eyes, white_check_mark, raised_hands, pray). You may "
+        "include more than one directive to add multiple reactions.\n"
+        "- If a reaction is all that's warranted, make the ENTIRE rest of your "
+        f"response exactly `{_SILENT_TOKEN}` so NO text message is sent — only "
+        f"the reaction lands. Example: `[[react:+1]] {_SILENT_TOKEN}`.\n"
+        "- When a substantive answer is needed, just reply normally; you may "
+        "still add a `[[react:...]]` directive on top if a reaction also fits.\n"
+        "- Use judgment: do not react to genuine questions or requests that need "
+        "a real answer, and do not over-use reactions."
+    )
+
+
+def _resolve_target(platform: str):
+    """Resolve (runner, adapter, chat_id, message_id, participant) for this turn.
+
+    Reads the *current* turn's chat/message ids from the session context vars
+    and the live adapter from the gateway runner. Returns None when not
+    reachable (CLI, no live gateway, missing ids, adapter not connected).
+    """
+    try:
+        from gateway.config import Platform
+        from gateway.run import _gateway_runner_ref
+        from gateway.session_context import get_session_env
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.debug("slack_react: gateway imports unavailable: %s", exc)
+        return None
+
+    chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    message_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+    if not chat_id or not message_id:
+        logger.debug("slack_react: no chat_id/message_id in session context")
+        return None
+
+    try:
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+    if runner is None:
+        return None
+
+    platform_enum = Platform.SLACK if platform == "slack" else Platform.WHATSAPP
+    try:
+        adapter = runner.adapters.get(platform_enum)
+    except Exception:
+        adapter = None
+    if adapter is None:
+        return None
+
+    participant = None
+    if platform == "whatsapp" and chat_id.endswith("@g.us"):
+        # In a group the react key needs the sender JID of the target message;
+        # for a 1:1 chat it is omitted (remoteJid is enough).
+        participant = get_session_env("HERMES_SESSION_USER_ID", "") or None
+
+    return runner, adapter, chat_id, message_id, participant
+
+
+def _dispatch(runner: Any, make_coro: Callable[[], Any]) -> bool:
+    """Run an adapter coroutine to completion (best-effort), returns success.
+
+    The hook fires in a gateway worker thread; the WhatsApp adapter's aiohttp
+    session is bound to the gateway loop, so schedule the coroutine there with
+    ``safe_schedule_threadsafe``. Fall back to a private loop (CLI/tests) when
+    no live gateway loop is available. ``make_coro`` is a factory so each path
+    awaits a fresh coroutine (never one already closed/consumed).
+    """
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is not None and not loop.is_closed():
+        try:
+            from agent.async_utils import safe_schedule_threadsafe
+        except Exception as exc:  # pragma: no cover - import guard
+            logger.debug("slack_react: async_utils unavailable: %s", exc)
+            return False
+        future = safe_schedule_threadsafe(
+            make_coro(),
+            loop,
+            logger=logger,
+            log_message="slack_react: reaction failed to schedule",
+        )
+        if future is None:
+            return False
+        try:
+            future.result(timeout=15)
+            return True
+        except Exception as exc:
+            logger.debug("slack_react: reaction call failed: %s", exc)
+            return False
+
+    # Fallback: no live gateway loop (CLI / tests).
+    try:
+        from model_tools import _run_async
+
+        _run_async(make_coro())
+        return True
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("slack_react: fallback dispatch failed: %s", exc)
+        return False
+
+
+def _add_reactions(platform: str, shortcodes: List[str]) -> int:
+    """Add each reaction to the current turn's message. Returns the count fired."""
+    target = _resolve_target(platform)
+    if target is None:
+        return 0
+    runner, adapter, chat_id, message_id, participant = target
+
+    count = 0
+    seen = set()
+    for raw in shortcodes:
+        name = raw.strip().strip(":").strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+
+        if platform == "slack":
+            add_reaction = getattr(adapter, "_add_reaction", None)
+            if not callable(add_reaction):
+                logger.debug("slack_react: slack adapter has no _add_reaction")
+                break
+            if _dispatch(runner, lambda n=name: add_reaction(chat_id, message_id, n)):
+                count += 1
+        else:  # whatsapp
+            emoji = _SHORTCODE_TO_UNICODE.get(key)
+            if not emoji:
+                logger.debug("slack_react: no unicode mapping for %r (whatsapp)", name)
+                continue
+            send_reaction = getattr(adapter, "send_reaction", None)
+            if not callable(send_reaction):
+                logger.debug("slack_react: whatsapp adapter has no send_reaction")
+                break
+            if _dispatch(
+                runner,
+                lambda e=emoji: send_reaction(
+                    chat_id, message_id, e, from_me=False, participant=participant
+                ),
+            ):
+                count += 1
+
+    if count:
+        logger.info(
+            "slack_react: added %d reaction(s) to %s/%s on %s",
+            count,
+            chat_id,
+            message_id,
+            platform,
+        )
+    return count
+
+
+# ----------------------------------------------------------------------------
+# Hooks
+# ----------------------------------------------------------------------------
+
+def _pre_llm_call(**kwargs) -> Optional[dict]:
+    """Inject the reaction policy into the turn context (Slack/WhatsApp only)."""
+    platform = _resolve_platform(kwargs.get("platform"))
+    if not platform:
+        return None
+    return {"context": _policy(platform)}
+
+
+def _transform_llm_output(**kwargs) -> Optional[str]:
+    """Act on any [[react:...]] directives in the model's reply.
+
+    Returns the cleaned reply text (react + reply), the NO_REPLY silence token
+    (react only), or None to leave the response unchanged.
+    """
+    platform = _resolve_platform(kwargs.get("platform"))
+    if not platform:
+        return None
+
+    text = kwargs.get("response_text") or ""
+    if not isinstance(text, str) or "[[" not in text:
+        return None
+
+    shortcodes = _DIRECTIVE_RE.findall(text)
+    if not shortcodes:
+        return None
+
+    # Fire the reactions (best-effort). Even if delivery fails we still strip
+    # the directive so raw markup never reaches the user.
+    try:
+        _add_reactions(platform, shortcodes)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("slack_react: _add_reactions raised: %s", exc)
+
+    cleaned = _DIRECTIVE_RE.sub("", text).strip()
+    if not cleaned or cleaned.upper() == _SILENT_TOKEN:
+        # Reaction is the whole response → stay silent.
+        return _SILENT_TOKEN
+    return cleaned
+
+
+def register(ctx) -> None:
+    """Register the two hooks. Called once when the plugin is enabled."""
+    ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("transform_llm_output", _transform_llm_output)
+    logger.info(
+        "slack_react plugin registered (pre_llm_call + transform_llm_output; "
+        "slack + whatsapp)"
+    )
