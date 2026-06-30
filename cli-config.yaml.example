@@ -1047,6 +1047,20 @@ display:
   # than a single edit-in-place heartbeat).
   long_running_notifications: true
 
+  # Heartbeat copy style for the long-running status notification above.
+  #   timer: edit-in-place "⏳ Working — N min" elapsed counter, optionally
+  #          with iteration/tool detail (see busy_ack_detail). Default.
+  #   quiet: calm soft-escalation copy with no timer, emoji, or per-tool
+  #          detail. The wording escalates with elapsed turn time:
+  #            < 5 min  -> "working on it"
+  #            < 15 min -> "still on it"
+  #            >= 15 min -> "still going"
+  #          Honours long_running_notifications (off => no heartbeat) and is
+  #          overrideable per platform under display.platforms.<platform>.
+  # When quiet, busy_ack_detail is intentionally ignored for the heartbeat —
+  # the point of this style is to stay quiet.
+  heartbeat_style: timer
+
   # Include detailed iteration/tool/status context in busy acknowledgments
   # and long-running heartbeats. When true, busy acks show "iteration 21/60,
   # terminal, 10 min" and the heartbeat shows "⏳ Working — 12 min,

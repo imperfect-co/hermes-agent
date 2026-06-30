@@ -53,6 +53,14 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
     "cleanup_progress": False,
+    # Long-running heartbeat copy style.
+    #   "timer": edit-in-place "⏳ Working — N min[, detail]" elapsed counter
+    #            (default — unchanged behaviour).
+    #   "quiet": calm soft-escalation copy with no timer, emoji, or per-tool
+    #            detail — "working on it" → "still on it" → "still going" as the
+    #            turn runs longer. Opt in globally (display.heartbeat_style:
+    #            quiet) or per-platform.
+    "heartbeat_style": "timer",
 }
 
 # ---------------------------------------------------------------------------
@@ -254,9 +262,43 @@ def _normalise(setting: str, value: Any) -> Any:
     if setting == "reasoning_style":
         val = str(value).lower()
         return val if val in ("code", "blockquote", "subtext") else "code"
+    if setting == "heartbeat_style":
+        val = str(value).lower()
+        return val if val in ("timer", "quiet") else "timer"
     if setting == "tool_preview_length":
         try:
             return int(value)
         except (TypeError, ValueError):
             return 0
     return value
+
+
+# ---------------------------------------------------------------------------
+# Quiet heartbeat copy (soft escalation)
+# ---------------------------------------------------------------------------
+# The "quiet" heartbeat style (display.heartbeat_style: quiet) replaces the
+# "⏳ Working — N min" timer with calm copy that softly escalates as the turn
+# runs longer. The phase tracks *elapsed time*, not the number of heartbeats
+# emitted, so the wording reads the same regardless of
+# agent.gateway_notify_interval. With a long interval the early phases are
+# simply skipped — which is correct, since "working on it" would understate a
+# turn that is already 15 minutes deep.
+
+QUIET_HEARTBEAT_STILL_ON_IT_SECONDS = 5 * 60
+QUIET_HEARTBEAT_STILL_GOING_SECONDS = 15 * 60
+
+
+def quiet_heartbeat_text(elapsed_seconds: float) -> str:
+    """Soft-escalation heartbeat copy for the ``quiet`` heartbeat style.
+
+    Returns one of three calm status lines, escalating with elapsed turn time:
+
+        elapsed <  5 min  -> "working on it"
+        elapsed < 15 min  -> "still on it"
+        elapsed >= 15 min -> "still going"
+    """
+    if elapsed_seconds < QUIET_HEARTBEAT_STILL_ON_IT_SECONDS:
+        return "working on it"
+    if elapsed_seconds < QUIET_HEARTBEAT_STILL_GOING_SECONDS:
+        return "still on it"
+    return "still going"

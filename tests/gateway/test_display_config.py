@@ -555,3 +555,109 @@ class TestReasoningStyle:
 
         config = {"display": {"reasoning_style": "SUBTEXT"}}
         assert resolve_display_setting(config, "telegram", "reasoning_style") == "subtext"
+
+
+class TestHeartbeatStyle:
+    """Per-platform long-running heartbeat copy style (timer | quiet)."""
+
+    def test_default_is_timer_everywhere(self):
+        """No config anywhere → built-in default 'timer' (unchanged behaviour)."""
+        from gateway.display_config import resolve_display_setting
+
+        for plat in ("telegram", "discord", "slack", "email", "unknown_platform"):
+            assert (
+                resolve_display_setting({}, plat, "heartbeat_style") == "timer"
+            ), plat
+
+    def test_global_override_to_quiet(self):
+        """display.heartbeat_style: quiet opts every platform into soft escalation."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"heartbeat_style": "quiet"}}
+        assert resolve_display_setting(config, "telegram", "heartbeat_style") == "quiet"
+        assert resolve_display_setting(config, "discord", "heartbeat_style") == "quiet"
+
+    def test_per_platform_override_wins(self):
+        """display.platforms.<plat>.heartbeat_style beats the global value."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "heartbeat_style": "timer",
+                "platforms": {"telegram": {"heartbeat_style": "quiet"}},
+            }
+        }
+        assert resolve_display_setting(config, "telegram", "heartbeat_style") == "quiet"
+        # Other platforms still get the global value.
+        assert resolve_display_setting(config, "discord", "heartbeat_style") == "timer"
+
+    def test_invalid_value_falls_back_to_timer(self):
+        """_normalise rejects anything outside timer|quiet."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"heartbeat_style": "bogus"}}
+        assert resolve_display_setting(config, "telegram", "heartbeat_style") == "timer"
+
+    def test_case_insensitive(self):
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"heartbeat_style": "QUIET"}}
+        assert resolve_display_setting(config, "telegram", "heartbeat_style") == "quiet"
+
+
+class TestQuietHeartbeatText:
+    """Soft-escalation copy: working on it → still on it → still going."""
+
+    def test_first_phase_working_on_it(self):
+        """Anything under the 'still on it' threshold reads 'working on it'."""
+        from gateway.display_config import quiet_heartbeat_text
+
+        assert quiet_heartbeat_text(0) == "working on it"
+        assert quiet_heartbeat_text(60) == "working on it"
+        assert quiet_heartbeat_text(5 * 60 - 1) == "working on it"
+
+    def test_second_phase_still_on_it(self):
+        """Between the two thresholds reads 'still on it', inclusive of the lower bound."""
+        from gateway.display_config import quiet_heartbeat_text
+
+        assert quiet_heartbeat_text(5 * 60) == "still on it"
+        assert quiet_heartbeat_text(10 * 60) == "still on it"
+        assert quiet_heartbeat_text(15 * 60 - 1) == "still on it"
+
+    def test_third_phase_still_going(self):
+        """At/after the upper threshold reads 'still going'."""
+        from gateway.display_config import quiet_heartbeat_text
+
+        assert quiet_heartbeat_text(15 * 60) == "still going"
+        assert quiet_heartbeat_text(60 * 60) == "still going"
+
+    def test_thresholds_match_published_constants(self):
+        """The boundaries are exactly the documented module constants."""
+        from gateway.display_config import (
+            QUIET_HEARTBEAT_STILL_GOING_SECONDS,
+            QUIET_HEARTBEAT_STILL_ON_IT_SECONDS,
+            quiet_heartbeat_text,
+        )
+
+        assert QUIET_HEARTBEAT_STILL_ON_IT_SECONDS == 5 * 60
+        assert QUIET_HEARTBEAT_STILL_GOING_SECONDS == 15 * 60
+        assert (
+            quiet_heartbeat_text(QUIET_HEARTBEAT_STILL_ON_IT_SECONDS - 1)
+            == "working on it"
+        )
+        assert (
+            quiet_heartbeat_text(QUIET_HEARTBEAT_STILL_ON_IT_SECONDS) == "still on it"
+        )
+        assert (
+            quiet_heartbeat_text(QUIET_HEARTBEAT_STILL_GOING_SECONDS) == "still going"
+        )
+
+    def test_escalation_is_monotonic_over_a_long_turn(self):
+        """Phases only ever advance — never regress — as elapsed time grows."""
+        from gateway.display_config import quiet_heartbeat_text
+
+        order = {"working on it": 0, "still on it": 1, "still going": 2}
+        seen = [quiet_heartbeat_text(s) for s in range(0, 30 * 60, 30)]
+        ranks = [order[s] for s in seen]
+        assert ranks == sorted(ranks)
+        assert set(seen) == set(order)  # all three phases are reachable
