@@ -1,0 +1,191 @@
+"""Tests for tools/voice_reply.py — native audio output (ADR 0024, Phase 1)."""
+
+from __future__ import annotations
+
+import base64
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from tools.voice_reply import (
+    RenderedVoiceNote,
+    VoiceRenderError,
+    detect_voice_locale,
+    render_voice_note,
+    user_requested_spoken_reply,
+)
+
+
+# ---------------------------------------------------------------------------
+# Locale detection
+# ---------------------------------------------------------------------------
+class TestDetectVoiceLocale:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Claro, ¿cómo estás hoy?",
+            "Hola, gracias por el mensaje, todo está muy bien",
+            "El perro corre por la calle",
+            "Mañana tengo una reunión",
+        ],
+    )
+    def test_spanish(self, text):
+        assert detect_voice_locale(text) == "es-ES"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Hey, can you check the deploy status?",
+            "no, me too",  # ambiguous English/Spanish overlap stays English
+            "lol that was funny out loud",
+            "",
+            "OK",
+        ],
+    )
+    def test_english_default(self, text):
+        assert detect_voice_locale(text) == "en-US"
+
+    def test_custom_default(self):
+        assert detect_voice_locale("hello there", default="fr-FR") == "fr-FR"
+
+
+# ---------------------------------------------------------------------------
+# Explicit spoken-reply request detection
+# ---------------------------------------------------------------------------
+class TestUserRequestedSpokenReply:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Can you send me a voice note?",
+            "reply with audio please",
+            "say it out loud",
+            "send a voice message",
+            "mándame un audio",
+            "respóndeme en voz alta",
+            "envíame una nota de voz",
+            "háblame",
+        ],
+    )
+    def test_positive(self, text):
+        assert user_requested_spoken_reply(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "what's the weather today?",
+            "the audio quality was bad on that call",
+            "I voted in the election",
+            "send me the report",
+            "",
+        ],
+    )
+    def test_negative(self, text):
+        assert user_requested_spoken_reply(text) is False
+
+
+# ---------------------------------------------------------------------------
+# Render
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _gemini_key(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+
+
+def _fake_gemini_response(pcm: bytes = b"\x00\x01" * 4800):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "audio/L16;codec=pcm;rate=24000",
+                                "data": base64.b64encode(pcm).decode(),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    return resp
+
+
+class TestRenderVoiceNote:
+    def test_renders_opus_ogg_with_spec_payload(self, tmp_path):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["json"] = kwargs.get("json")
+            return _fake_gemini_response()
+
+        out = str(tmp_path / "reply.mp3")  # wrong ext on purpose; forced to .ogg
+        with patch("requests.post", fake_post):
+            part = render_voice_note("Hola, ¿cómo estás? Todo está muy bien.", out)
+
+        assert isinstance(part, RenderedVoiceNote)
+        assert part.path.endswith(".ogg")
+        assert part.locale == "es-ES"
+        assert part.mime_type == "audio/ogg; codecs=opus"
+        assert os.path.getsize(part.path) > 0
+
+        # Real OggS/Opus container produced by ffmpeg libopus
+        head = open(part.path, "rb").read(64)
+        assert head[:4] == b"OggS"
+        assert b"Opus" in head
+
+        gc = captured["json"]["generationConfig"]
+        assert gc["responseModalities"] == ["AUDIO"]
+        assert (
+            gc["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+            == "Charon"
+        )
+        assert gc["speechConfig"]["languageCode"] == "es-ES"
+        # The default 2.5-flash-preview-tts is a non-thinking model and rejects
+        # thinkingConfig (HTTP 400), so it must be omitted for it.
+        assert "thinkingConfig" not in gc
+        assert "generativelanguage.googleapis.com/v1beta" in captured["url"]
+        assert "gemini-2.5-flash-preview-tts" in captured["url"]
+
+    def test_explicit_locale_and_voice_override(self, tmp_path):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return _fake_gemini_response()
+
+        out = str(tmp_path / "reply.ogg")
+        with patch("requests.post", fake_post):
+            part = render_voice_note(
+                "Buenos días", out, voice="Kore", locale="en-US"
+            )
+        assert part.locale == "en-US"
+        gc = captured["json"]["generationConfig"]
+        assert gc["speechConfig"]["languageCode"] == "en-US"
+        assert (
+            gc["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+            == "Kore"
+        )
+
+    def test_empty_text_raises(self, tmp_path):
+        with pytest.raises(VoiceRenderError):
+            render_voice_note("   ", str(tmp_path / "x.ogg"))
+
+    def test_http_error_raises_voice_render_error(self, tmp_path):
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = "boom"
+        resp.json.return_value = {"error": {"message": "boom"}}
+        with patch("requests.post", lambda *a, **k: resp):
+            with pytest.raises(VoiceRenderError):
+                render_voice_note("hello", str(tmp_path / "x.ogg"))
+
+    def test_missing_ffmpeg_raises(self, tmp_path):
+        with patch("tools.voice_reply.shutil.which", return_value=None):
+            with pytest.raises(VoiceRenderError, match="ffmpeg"):
+                render_voice_note("hello", str(tmp_path / "x.ogg"))

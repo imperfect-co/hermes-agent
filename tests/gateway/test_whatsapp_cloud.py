@@ -2423,3 +2423,65 @@ class TestReplyContextResolution:
             == "here is your answer"
         )
 
+
+
+class TestSendVoice:
+    """send_voice — native voice-note (PTT) delivery, incl. native audio output."""
+
+    @pytest.mark.asyncio
+    async def test_preencoded_ogg_sent_as_opus_voice_note(self):
+        """A pre-encoded opus-in-ogg (native audio output) ships with the PTT
+        MIME directly — no MP3 round-trip, no reliance on mimetypes."""
+        adapter = _make_adapter()
+        adapter._send_media_from_path_or_link = AsyncMock(
+            return_value=_make_send_result(True, "wamid.voice")
+        )
+        path = _tmpfile(".ogg", content=b"OggS-fake-opus")
+        try:
+            result = await adapter.send_voice("15551234567", path)
+            assert result.success is True
+            adapter._send_media_from_path_or_link.assert_awaited_once()
+            kwargs = adapter._send_media_from_path_or_link.call_args.kwargs
+            args = adapter._send_media_from_path_or_link.call_args.args
+            assert kwargs.get("mime_type") == "audio/ogg; codecs=opus"
+            assert "audio" in args  # media_kind
+        finally:
+            _os.unlink(path)
+
+    @pytest.mark.asyncio
+    async def test_preencoded_opus_extension_also_voice_note(self):
+        adapter = _make_adapter()
+        adapter._send_media_from_path_or_link = AsyncMock(
+            return_value=_make_send_result(True, "wamid.voice2")
+        )
+        path = _tmpfile(".opus", content=b"OggS-fake-opus")
+        try:
+            await adapter.send_voice("15551234567", path)
+            kwargs = adapter._send_media_from_path_or_link.call_args.kwargs
+            assert kwargs.get("mime_type") == "audio/ogg; codecs=opus"
+        finally:
+            _os.unlink(path)
+
+    @pytest.mark.asyncio
+    async def test_mp3_still_converted_to_opus(self):
+        """The legacy MP3 path is untouched: convert then ship as a voice note."""
+        adapter = _make_adapter()
+        adapter._send_media_from_path_or_link = AsyncMock(
+            return_value=_make_send_result(True, "wamid.voice3")
+        )
+        opus_path = _tmpfile(".ogg", content=b"converted")
+        adapter._convert_to_opus = AsyncMock(return_value=opus_path)
+        mp3_path = _tmpfile(".mp3", content=b"id3-fake")
+        try:
+            await adapter.send_voice("15551234567", mp3_path)
+            adapter._convert_to_opus.assert_awaited_once()
+            kwargs = adapter._send_media_from_path_or_link.call_args.kwargs
+            assert kwargs.get("mime_type") == "audio/ogg; codecs=opus"
+        finally:
+            _os.unlink(mp3_path)
+
+
+def _make_send_result(success: bool, message_id: str):
+    from gateway.platforms.base import SendResult
+
+    return SendResult(success=success, message_id=message_id)

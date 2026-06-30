@@ -175,6 +175,71 @@ class TestGenerateGeminiTts:
         payload = mock_post.call_args[1]["json"]
         assert payload["generationConfig"]["responseModalities"] == ["AUDIO"]
 
+    def test_thinking_config_omitted_for_non_thinking_default_model(self, tmp_path, monkeypatch, mock_gemini_response):
+        # 2.5-flash-preview-tts rejects thinkingConfig (HTTP 400). It must be omitted.
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), {})
+
+        payload = mock_post.call_args[1]["json"]
+        assert "thinkingConfig" not in payload["generationConfig"]
+
+    def test_thinking_budget_zero_for_thinking_model(self, tmp_path, monkeypatch, mock_gemini_response):
+        # gemini-3.x TTS are thinking models -> pin budget to 0 to force audio.
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {"gemini": {"model": "gemini-3.0-flash-tts"}}
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), config)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
+
+    def test_thinking_budget_override_for_thinking_model(self, tmp_path, monkeypatch, mock_gemini_response):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {"gemini": {"model": "gemini-3.1-flash-tts", "thinking_budget": 128}}
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), config)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 128
+
+    def test_supports_thinking_helper(self):
+        from tools.tts_tool import _gemini_model_supports_thinking as f
+
+        assert f("gemini-2.5-flash-preview-tts") is False
+        assert f("gemini-3.0-flash-tts") is True
+        assert f("gemini-3.1-flash-tts") is True
+        assert f("models/gemini-3.5-pro-tts") is True
+        assert f("gemini-2.5-pro-preview-tts") is False
+        assert f("gemini-3.0-flash") is False  # not a TTS model
+
+    def test_language_code_set_when_configured(self, tmp_path, monkeypatch, mock_gemini_response):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {"gemini": {"language_code": "es-ES"}}
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hola", str(tmp_path / "test.wav"), config)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["speechConfig"]["languageCode"] == "es-ES"
+
+    def test_language_code_omitted_when_unset(self, tmp_path, monkeypatch, mock_gemini_response):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), {})
+
+        payload = mock_post.call_args[1]["json"]
+        assert "languageCode" not in payload["generationConfig"]["speechConfig"]
+
     def test_http_error_raises_runtime_error(self, tmp_path, monkeypatch):
         from tools.tts_tool import _generate_gemini_tts
 

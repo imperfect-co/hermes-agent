@@ -1118,6 +1118,21 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         source = audio_path
         mime_type: Optional[str] = None
 
+        is_local = (
+            not audio_path.startswith(("http://", "https://"))
+            and os.path.exists(audio_path)
+        )
+        # Already opus-in-ogg (e.g. the native audio output reply path renders
+        # opus directly). Send as-is with the explicit voice-note MIME so it
+        # lands as the green PTT bubble — no lossy MP3 round-trip, and don't
+        # rely on mimetypes.guess_type (which returns bare "audio/ogg").
+        if is_local and audio_path.lower().endswith((".ogg", ".opus")):
+            return await self._send_media_from_path_or_link(
+                chat_id, audio_path, "audio",
+                caption=caption, reply_to=reply_to,
+                mime_type="audio/ogg; codecs=opus",
+            )
+
         is_local_mp3 = (
             not audio_path.startswith(("http://", "https://"))
             and audio_path.lower().endswith(".mp3")
