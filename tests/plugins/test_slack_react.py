@@ -128,6 +128,14 @@ def test_slack_multiple_directives_dedup(monkeypatch):
     assert adapter.calls == [("C1", "111.222", "+1"), ("C1", "111.222", "tada")]
 
 
+def test_slack_reaction_count_capped(monkeypatch):
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    directives = "".join(f"[[react:r{i}]]" for i in range(sr._MAX_REACTIONS_PER_RESPONSE + 3))
+    sr._transform_llm_output(platform="slack", response_text=directives + " done")
+    assert len(adapter.calls) == sr._MAX_REACTIONS_PER_RESPONSE
+
+
 # ---------------------------------------------------------------------------
 # transform_llm_output — WhatsApp (shortcode -> unicode, participant)
 # ---------------------------------------------------------------------------

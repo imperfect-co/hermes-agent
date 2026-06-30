@@ -66,6 +66,10 @@ _SILENT_TOKEN = "NO_REPLY"
 # session context vars and a live adapter with a reaction method.
 _SUPPORTED_PLATFORMS = ("slack", "whatsapp")
 
+# Hard cap on distinct reactions fired per response — each is a sequential
+# platform call, so bound it even if the model emits many directives.
+_MAX_REACTIONS_PER_RESPONSE = 5
+
 # WhatsApp's Baileys `react` payload takes a literal unicode emoji, not a Slack
 # shortcode. Map the shortcodes advertised in the policy (plus a few common
 # extras) so one directive vocabulary works across both platforms. Unmapped
@@ -199,6 +203,8 @@ def _dispatch(runner: Any, make_coro: Callable[[], Any]) -> bool:
             future.result(timeout=15)
             return True
         except Exception as exc:
+            # Cancel so a slow call can't land a late reaction after we give up.
+            future.cancel()
             logger.debug("slack_react: reaction call failed: %s", exc)
             return False
 
@@ -227,6 +233,12 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
         key = name.lower()
         if not name or key in seen:
             continue
+        if len(seen) >= _MAX_REACTIONS_PER_RESPONSE:
+            logger.debug(
+                "slack_react: reaction limit (%d) reached; skipping the rest",
+                _MAX_REACTIONS_PER_RESPONSE,
+            )
+            break
         seen.add(key)
 
         if platform == "slack":
@@ -254,13 +266,8 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
                 count += 1
 
     if count:
-        logger.info(
-            "slack_react: added %d reaction(s) to %s/%s on %s",
-            count,
-            chat_id,
-            message_id,
-            platform,
-        )
+        # Aggregate only — no chat/message identifiers at info level.
+        logger.info("slack_react: added %d reaction(s) on %s", count, platform)
     return count
 
 
