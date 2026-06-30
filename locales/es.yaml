@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "No hay ningún comando pendiente que aprobar."
-    once_singular:         "✅ Comando aprobado. El agente se está reanudando..."
-    once_plural:           "✅ Comandos aprobados ({count} comandos). El agente se está reanudando..."
-    session_singular:      "✅ Comando aprobado (patrón aprobado para esta sesión). El agente se está reanudando..."
-    session_plural:        "✅ Comandos aprobados (patrón aprobado para esta sesión) ({count} comandos). El agente se está reanudando..."
-    always_singular:       "✅ Comando aprobado (patrón aprobado permanentemente). El agente se está reanudando..."
-    always_plural:         "✅ Comandos aprobados (patrón aprobado permanentemente) ({count} comandos). El agente se está reanudando..."
+    once_singular:         "Comando aprobado. El agente se está reanudando..."
+    once_plural:           "Comandos aprobados. El agente se está reanudando..."
+    session_singular:      "Comando aprobado (patrón aprobado para esta sesión). El agente se está reanudando..."
+    session_plural:        "Comandos aprobados (patrón aprobado para esta sesión). El agente se está reanudando..."
+    always_singular:       "Comando aprobado (patrón aprobado permanentemente). El agente se está reanudando..."
+    always_plural:         "Comandos aprobados (patrón aprobado permanentemente). El agente se está reanudando..."
 
   background:
     usage:                 "Uso: /background <prompt>\nEjemplo: /background Resume las principales historias de HN de hoy\n\nEjecuta el prompt en una sesión separada. Puedes seguir chateando — el resultado aparecerá aquí cuando termine."

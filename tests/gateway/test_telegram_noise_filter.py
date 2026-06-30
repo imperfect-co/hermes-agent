@@ -1,11 +1,14 @@
 """Gateway noise/secret filtering across chat surfaces (Telegram + siblings)."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from gateway.config import Platform
 from gateway.run import (
     _prepare_gateway_status_message,
     _sanitize_gateway_final_response,
+    _source_is_group_chat,
 )
 
 # Every human-facing chat surface that must receive noise-filtered,
@@ -35,6 +38,8 @@ NOISY_STATUS_MESSAGES = [
     "⚠ Compression summary failed: upstream error. Inserted a fallback context marker.",
     "⏱️ Rate limited. Waiting 30.0s (attempt 2/3)...",
     "⏳ Retrying in 4.2s (attempt 1/3)...",
+    # Issue #35: iteration/turn budget exhaustion is a diagnostic, not chat.
+    "⚠️ Iteration budget exhausted (90/90) — asking model to summarise",
 ]
 
 
@@ -158,6 +163,32 @@ def test_telegram_status_sanitizes_raw_provider_security_errors():
     assert "cybersecurity risk" not in sanitized.lower()
     assert "HTTP 400" not in sanitized
     assert "req_123" not in sanitized
+
+
+# ---------------------------------------------------------------------------
+# Issue #35: group chats are 100% silent for diagnostic/status pings.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("chat_type", "chat_id", "expected"),
+    [
+        ("group", "-1001234567890", True),            # Telegram group
+        ("supergroup", "-1009", True),                # explicit supergroup
+        ("channel", "C0FORUM", True),                 # Slack/Discord channel
+        ("group", "120363@g.us", True),               # WhatsApp group JID
+        ("dm", "120363@g.us", True),                  # @g.us suffix wins over chat_type
+        ("dm", "12065551212@s.whatsapp.net", False),  # WhatsApp 1:1
+        ("dm", "987654321", False),                   # plain DM
+        ("thread", "555", False),                     # DM topic-thread is not a group
+        ("", "", False),                              # unknown → status still flows
+    ],
+)
+def test_source_is_group_chat_detection(chat_type, chat_id, expected):
+    """Group/channel chat_types and WhatsApp `@g.us` JIDs are groups; DMs and
+    DM topic-threads are not (Issue #35 zero-noise policy)."""
+    source = SimpleNamespace(chat_type=chat_type, chat_id=chat_id, platform=None)
+    assert _source_is_group_chat(source) is expected
 
 
 def test_telegram_final_response_sanitizes_raw_provider_errors():

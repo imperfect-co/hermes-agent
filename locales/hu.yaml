@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "Nincs jóváhagyásra váró parancs."
-    once_singular:         "✅ Parancs jóváhagyva. Az ügynök folytatja..."
-    once_plural:           "✅ Parancsok jóváhagyva ({count} parancs). Az ügynök folytatja..."
-    session_singular:      "✅ Parancs jóváhagyva (minta jóváhagyva ehhez a munkamenethez). Az ügynök folytatja..."
-    session_plural:        "✅ Parancsok jóváhagyva (minta jóváhagyva ehhez a munkamenethez) ({count} parancs). Az ügynök folytatja..."
-    always_singular:       "✅ Parancs jóváhagyva (minta véglegesen jóváhagyva). Az ügynök folytatja..."
-    always_plural:         "✅ Parancsok jóváhagyva (minta véglegesen jóváhagyva) ({count} parancs). Az ügynök folytatja..."
+    once_singular:         "Parancs jóváhagyva. Az ügynök folytatja..."
+    once_plural:           "Parancsok jóváhagyva. Az ügynök folytatja..."
+    session_singular:      "Parancs jóváhagyva (minta jóváhagyva ehhez a munkamenethez). Az ügynök folytatja..."
+    session_plural:        "Parancsok jóváhagyva (minta jóváhagyva ehhez a munkamenethez). Az ügynök folytatja..."
+    always_singular:       "Parancs jóváhagyva (minta véglegesen jóváhagyva). Az ügynök folytatja..."
+    always_plural:         "Parancsok jóváhagyva (minta véglegesen jóváhagyva). Az ügynök folytatja..."
 
   background:
     usage:                 "Használat: /background <prompt>\nPélda: /background Foglald össze a mai legjobb HN sztorikat\n\nKülön munkamenetben futtatja a promptot. Folytathatod a beszélgetést — az eredmény itt jelenik meg, amint elkészül."

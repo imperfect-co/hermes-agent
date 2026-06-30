@@ -85,6 +85,7 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"|max\s+retries\s+\(\d+\).*(?:trying\s+fallback|exhausted|invalid\s+responses)"
     r"|stream\s+(?:drop|drop\s+mid\s+tool-call).+retry\s+\d"
     r"|stale\s+connections\s+from\s+a\s+previous\s+provider\s+issue"
+    r"|budget\s+exhausted"  # Issue #35: iteration/turn budget exhaustion belongs in logs, not chats
     r")",
     re.IGNORECASE | re.DOTALL,
 )
@@ -447,6 +448,22 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     if _looks_like_gateway_provider_error(text):
         return _gateway_provider_error_reply(text)
     return text
+
+
+def _source_is_group_chat(source: Any) -> bool:
+    """True for multi-party chats (groups/channels) where diagnostic/status
+    pings must stay 100% silent (Issue #35).
+
+    Detects both the structured ``chat_type`` (group/supergroup/channel across
+    Telegram/Discord/Slack/...) and the WhatsApp group-JID suffix (``...@g.us``).
+    DMs and DM topic-threads are not groups and still receive status updates
+    (which are narrated/marked elsewhere).
+    """
+    chat_type = str(getattr(source, "chat_type", "") or "").strip().lower()
+    if chat_type in {"group", "supergroup", "channel"}:
+        return True
+    chat_id = str(getattr(source, "chat_id", "") or "")
+    return chat_id.endswith("@g.us")
 
 
 def render_notice_line(notice) -> str:
@@ -4976,8 +4993,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         elif is_queue_mode:
             message = (
-                f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
+                "Got your message, but I'm still running a task in the background. "
+                "I'll get right on this as soon as it finishes."
             )
         else:
             message = (
@@ -16320,6 +16337,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
+            # Issue #35: group chats are 100% silent for diagnostic/status
+            # pings. Lifecycle narration and interactive approval prompts ride
+            # other paths; this status_callback is pure diagnostics, so drop it
+            # entirely in groups.
+            if _source_is_group_chat(source):
+                logger.debug(
+                    "status_callback suppressed (group chat) for %s/%s",
+                    source.platform.value if source.platform else "unknown",
+                    event_type,
+                )
+                return
             prepared_message = _prepare_gateway_status_message(
                 source.platform,
                 event_type,
@@ -17000,7 +17028,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
                 msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
+                    "I need to run a sensitive command. Can you give me the green light?\n"
                     f"```\n{cmd_preview}\n```\n"
                     f"Reason: {desc}\n\n"
                     f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "

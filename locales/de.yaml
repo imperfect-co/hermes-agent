@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "Kein ausstehender Befehl zum Genehmigen."
-    once_singular:         "✅ Befehl genehmigt. Der Agent wird fortgesetzt..."
-    once_plural:           "✅ Befehle genehmigt ({count} Befehle). Der Agent wird fortgesetzt..."
-    session_singular:      "✅ Befehl genehmigt (Muster für diese Sitzung genehmigt). Der Agent wird fortgesetzt..."
-    session_plural:        "✅ Befehle genehmigt (Muster für diese Sitzung genehmigt) ({count} Befehle). Der Agent wird fortgesetzt..."
-    always_singular:       "✅ Befehl genehmigt (Muster dauerhaft genehmigt). Der Agent wird fortgesetzt..."
-    always_plural:         "✅ Befehle genehmigt (Muster dauerhaft genehmigt) ({count} Befehle). Der Agent wird fortgesetzt..."
+    once_singular:         "Befehl genehmigt. Der Agent wird fortgesetzt..."
+    once_plural:           "Befehle genehmigt. Der Agent wird fortgesetzt..."
+    session_singular:      "Befehl genehmigt (Muster für diese Sitzung genehmigt). Der Agent wird fortgesetzt..."
+    session_plural:        "Befehle genehmigt (Muster für diese Sitzung genehmigt). Der Agent wird fortgesetzt..."
+    always_singular:       "Befehl genehmigt (Muster dauerhaft genehmigt). Der Agent wird fortgesetzt..."
+    always_plural:         "Befehle genehmigt (Muster dauerhaft genehmigt). Der Agent wird fortgesetzt..."
 
   background:
     usage:                 "Verwendung: /background <prompt>\nBeispiel: /background Fasse die Top-HN-Storys von heute zusammen\n\nFührt den Prompt in einer separaten Sitzung aus. Sie können weiter chatten — das Ergebnis erscheint hier, wenn es fertig ist."
