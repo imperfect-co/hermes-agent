@@ -45,6 +45,7 @@ Enable in ``~/.hermes/config.yaml``::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -222,11 +223,12 @@ def _dispatch(runner: Any, make_coro: Callable[[], Any], timeout: float = 15.0) 
             logger.debug("slack_react: reaction call failed: %s", exc)
             return False
 
-    # Fallback: no live (running) gateway loop (CLI / tests).
+    # Fallback: no live (running) gateway loop (CLI / tests). Honor the same
+    # timeout here via wait_for, since _run_async's own deadline is far longer.
     try:
         from model_tools import _run_async
 
-        return _run_async(make_coro())
+        return _run_async(asyncio.wait_for(make_coro(), max(0.01, timeout)))
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("slack_react: fallback dispatch failed: %s", exc)
         return False
@@ -282,9 +284,10 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
             if not callable(add_reaction):
                 logger.debug("slack_react: slack adapter has no _add_reaction")
                 break
+            # Slack emoji names are lowercase — normalize so "TADA" == "tada".
             if _reaction_ok(
                 _dispatch(
-                    runner, lambda n=name: add_reaction(chat_id, message_id, n), timeout=remaining
+                    runner, lambda n=key: add_reaction(chat_id, message_id, n), timeout=remaining
                 )
             ):
                 count += 1

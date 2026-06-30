@@ -111,6 +111,13 @@ def test_slack_react_plus_reply_returns_clean_text(monkeypatch):
     assert adapter.calls == [("C1", "111.222", "eyes")]
 
 
+def test_slack_shortcode_lowercased(monkeypatch):
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    sr._transform_llm_output(platform="slack", response_text="[[react:TADA]] NO_REPLY")
+    assert adapter.calls == [("C1", "111.222", "tada")]
+
+
 def test_slack_bare_directive_is_silent(monkeypatch):
     adapter = FakeSlackAdapter()
     _patch_target(monkeypatch, adapter)
@@ -339,6 +346,20 @@ def test_dispatch_fallback_without_gateway_loop():
     runner = SimpleNamespace(_gateway_loop=None)
     assert sr._dispatch(runner, lambda: coro()) is True
     assert ran["n"] == 1
+
+
+def test_dispatch_fallback_honors_timeout():
+    # The fallback (private-loop) path must also respect the timeout, not block
+    # for _run_async's much longer internal deadline.
+    async def slow():
+        await asyncio.sleep(5)
+
+    runner = SimpleNamespace(_gateway_loop=None)
+    start = time.monotonic()
+    ok = sr._dispatch(runner, lambda: slow(), timeout=0.3)
+    elapsed = time.monotonic() - start
+    assert ok is False
+    assert elapsed < 2.0
 
 
 def test_dispatch_skips_non_running_loop():
