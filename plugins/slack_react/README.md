@@ -51,7 +51,7 @@ keeps CLI/test contexts working.
 
 ## Directive format (what the model emits)
 
-```
+```text
 [[react:EMOJI]]        # EMOJI = shortcode w/o colons: +1, tada, eyes, ...
 ```
 
