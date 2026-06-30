@@ -46,6 +46,8 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
     "matin@hermes.ai": "imperfect-membrane",  # project owner git identity
+    "membrane@agents.imperfect.co": "imperfect-membrane",  # membrane agent git identity
+    "matin@users.noreply.github.com": "imperfect-membrane",  # project owner GitHub noreply
     "186512915+lEWFkRAD@users.noreply.github.com": "lEWFkRAD",  # PR #53848 salvage (stream the MoA aggregator response to the user)
     "193368749+jimmyjohansson84@users.noreply.github.com": "jimmyjohansson84",  # PR #27123 salvage (Kanban unknown-skill warn-instead-of-crash; #27136)
     "gxalong@gmail.com": "Jeffgithub0029",  # PR #28558 salvage (chunk Telegram text *after* MarkdownV2/HTML formatting so escaping inflation can't push a send over the 4096 UTF-16 limit; #28557)
