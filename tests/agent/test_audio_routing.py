@@ -52,13 +52,24 @@ class TestDecideAudioInputMode:
                 == "stt"
             )
 
-    def test_always_forces_native_even_for_unknown_model(self):
+    def test_always_forces_native_on_supported_provider_even_for_unknown_model(self):
         with patch("agent.audio_routing._lookup_supports_audio", return_value=None):
             assert (
                 decide_audio_input_mode(
-                    "custom", "my-local-model", {"stt": {"native_audio": "always"}}
+                    "gemini", "my-experimental-model", {"stt": {"native_audio": "always"}}
                 )
                 == "native"
+            )
+
+    def test_always_still_stt_on_provider_without_audio_adapter(self):
+        # An adapter that can't translate input_audio would silently drop the
+        # bytes; "always" must not route native there.
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert (
+                decide_audio_input_mode(
+                    "openai", "gpt-4o-audio", {"stt": {"native_audio": "always"}}
+                )
+                == "stt"
             )
 
     def test_auto_native_when_model_supports_audio(self):
@@ -70,16 +81,36 @@ class TestDecideAudioInputMode:
                 == "native"
             )
 
+    def test_auto_stt_when_provider_adapter_lacks_audio_support(self):
+        # Even an audio-capable model on a non-Gemini provider routes to STT in
+        # auto, because that provider's adapter has no input_audio branch.
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert (
+                decide_audio_input_mode("openai", "gpt-4o-audio", {"stt": {"native_audio": "auto"}})
+                == "stt"
+            )
+
     def test_auto_stt_when_model_lacks_audio(self):
         with patch("agent.audio_routing._lookup_supports_audio", return_value=False):
             assert (
-                decide_audio_input_mode("openai", "gpt-4", {"stt": {"native_audio": "auto"}})
+                decide_audio_input_mode("gemini", "gemini-1.0", {"stt": {"native_audio": "auto"}})
                 == "stt"
             )
 
     def test_auto_stt_when_capability_unknown(self):
         with patch("agent.audio_routing._lookup_supports_audio", return_value=None):
-            assert decide_audio_input_mode("x", "y", {"stt": {"native_audio": "auto"}}) == "stt"
+            assert (
+                decide_audio_input_mode("gemini", "y", {"stt": {"native_audio": "auto"}}) == "stt"
+            )
+
+    def test_google_provider_alias_supported(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert (
+                decide_audio_input_mode(
+                    "google", "gemini-3.5-flash", {"stt": {"native_audio": "auto"}}
+                )
+                == "native"
+            )
 
     def test_none_config_behaves_as_auto(self):
         with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
@@ -87,7 +118,7 @@ class TestDecideAudioInputMode:
 
     def test_missing_stt_block_behaves_as_auto(self):
         with patch("agent.audio_routing._lookup_supports_audio", return_value=False):
-            assert decide_audio_input_mode("openai", "gpt-4", {"agent": {}}) == "stt"
+            assert decide_audio_input_mode("gemini", "gemini-1.0", {"agent": {}}) == "stt"
 
 
 # ─── capability lookup wiring (uses ModelInfo.supports_audio_input) ──────────
@@ -161,6 +192,66 @@ class TestGuards:
 
     def test_missing_file_is_skipped_not_crash(self):
         assert exceeds_native_audio_limits(["/nope/missing.ogg"], None) is None
+
+    def test_duration_ceiling_via_auto_probe_on_wav(self, tmp_path: Path):
+        # A real (silent) WAV longer than the configured ceiling must fall back
+        # without the caller supplying durations — the helper probes it.
+        import wave
+
+        clip = tmp_path / "long.wav"
+        rate = 8000
+        seconds = 3
+        with wave.open(str(clip), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(b"\x00\x00" * rate * seconds)
+        reason = exceeds_native_audio_limits([str(clip)], {"stt": {"native_audio_max_seconds": 1}})
+        assert reason is not None and "native ceiling" in reason
+
+    def test_unprobeable_duration_passes(self, tmp_path: Path):
+        # A format we can't probe (e.g. .mp3 without ffprobe in this helper)
+        # is allowed through on duration; the byte ceiling still guards.
+        clip = tmp_path / "x.mp3"
+        clip.write_bytes(b"\x00" * 10)
+        assert exceeds_native_audio_limits([str(clip)], {"stt": {"native_audio_max_seconds": 1}}) is None
+
+
+class TestProbeAudioDurationSeconds:
+    def test_wav_duration(self, tmp_path: Path):
+        import wave
+
+        from agent.audio_routing import probe_audio_duration_seconds
+
+        clip = tmp_path / "c.wav"
+        with wave.open(str(clip), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(4000)
+            wf.writeframes(b"\x00\x00" * 4000 * 2)  # 2 seconds
+        assert abs(probe_audio_duration_seconds(str(clip)) - 2.0) < 0.01
+
+    def test_unknown_extension_returns_none(self, tmp_path: Path):
+        from agent.audio_routing import probe_audio_duration_seconds
+
+        clip = tmp_path / "c.bin"
+        clip.write_bytes(b"abc")
+        assert probe_audio_duration_seconds(str(clip)) is None
+
+
+class TestProviderGate:
+    def test_gemini_and_google_supported(self):
+        from agent.audio_routing import _provider_supports_native_audio
+
+        assert _provider_supports_native_audio("gemini") is True
+        assert _provider_supports_native_audio("GOOGLE") is True
+
+    def test_other_providers_unsupported(self):
+        from agent.audio_routing import _provider_supports_native_audio
+
+        assert _provider_supports_native_audio("openai") is False
+        assert _provider_supports_native_audio("anthropic") is False
+        assert _provider_supports_native_audio("") is False
 
 
 # ─── _guess_audio_format ─────────────────────────────────────────────────────

@@ -36,7 +36,7 @@ def _source(chat_id: str) -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
         chat_id=chat_id,
-        chat_type="private",
+        chat_type="dm",
         user_name=f"user-{chat_id}",
     )
 

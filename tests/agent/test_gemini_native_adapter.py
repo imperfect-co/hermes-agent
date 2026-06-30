@@ -522,6 +522,22 @@ def test_extract_multimodal_parts_invalid_audio_base64_is_skipped():
     assert parts == [{"text": "keep me"}]
 
 
+def test_extract_multimodal_parts_non_base64_data_url_rejected():
+    """A data: URL without ;base64 (or with garbage payload) is rejected."""
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    # No ;base64 marker.
+    p1 = _extract_multimodal_parts(
+        [{"type": "audio", "audio": {"url": "data:audio/wav,plain-not-base64"}}]
+    )
+    assert p1 == []
+    # ;base64 marker but invalid payload.
+    p2 = _extract_multimodal_parts(
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}}]
+    )
+    assert p2 == []
+
+
 def test_extract_multimodal_parts_text_and_image_still_work():
     """Regression: the existing text/image branches are unchanged."""
     import base64

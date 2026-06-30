@@ -213,13 +213,17 @@ def _coerce_content_to_text(content: Any) -> str:
 
 def _data_url_to_inline_data(url: str) -> Optional[Dict[str, Any]]:
     """Decode a ``data:<mime>;base64,<payload>`` URL into a Gemini ``inlineData``
-    part. Returns None when the URL isn't a decodable data URL."""
+    part. Returns None unless the URL is a strict base64 data URL with a
+    decodable payload (require ``;base64`` and validate the payload, so a
+    malformed/garbage data URL is rejected rather than silently normalized)."""
     if not isinstance(url, str) or not url.startswith("data:"):
         return None
     try:
         header, encoded = url.split(",", 1)
+        if ";base64" not in header.lower():
+            return None
         mime = header.split(":", 1)[1].split(";", 1)[0]
-        raw = base64.b64decode(encoded)
+        raw = base64.b64decode(encoded, validate=True)
     except Exception:
         return None
     return {"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}}

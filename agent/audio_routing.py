@@ -123,6 +123,20 @@ def _lookup_supports_audio(
     return bool(info.supports_audio_input())
 
 
+# Providers whose adapter actually translates an OpenAI-style ``input_audio``
+# part into the vendor's native audio format. A model can report audio input in
+# models.dev while the *adapter* on the active provider has no audio branch and
+# would silently drop the part — routing native there loses the message. Today
+# only the native Gemini adapter (agent/gemini_native_adapter.py) handles it.
+# Other adapters can be added here as they grow the branch.
+_NATIVE_AUDIO_PROVIDERS = frozenset({"gemini", "google"})
+
+
+def _provider_supports_native_audio(provider: str) -> bool:
+    """True when the active provider's adapter can ingest native audio parts."""
+    return (provider or "").strip().lower() in _NATIVE_AUDIO_PROVIDERS
+
+
 def decide_audio_input_mode(
     provider: str,
     model: str,
@@ -137,11 +151,17 @@ def decide_audio_input_mode(
 
     Decision table:
       * ``never``  → always ``stt`` (current default behaviour preserved).
-      * ``always`` → always ``native`` (caller asserts the model can hear).
-      * ``auto``   → ``native`` iff ``supports_audio_input`` is true, else ``stt``.
+      * ``always`` → ``native`` when the active provider's adapter handles audio
+        (the caller asserts the model can hear); else ``stt``, because routing
+        native to an adapter without an audio branch would silently drop the
+        bytes — worse than transcribing.
+      * ``auto``   → ``native`` iff the model reports audio input support **and**
+        the provider's adapter handles native audio; else ``stt``.
     """
     mode = _read_native_audio_mode(cfg)
     if mode == "never":
+        return "stt"
+    if not _provider_supports_native_audio(provider):
         return "stt"
     if mode == "always":
         return "native"
@@ -175,6 +195,33 @@ def native_audio_max_seconds(cfg: Optional[Dict[str, Any]]) -> int:
     return _read_int_guard(cfg, "native_audio_max_seconds", DEFAULT_NATIVE_AUDIO_MAX_SECONDS)
 
 
+def probe_audio_duration_seconds(path: str) -> Optional[float]:
+    """Best-effort clip duration in seconds. Returns None when it can't be read.
+
+    Cheap, dependency-light, and synchronous: stdlib ``wave`` for WAV, ``mutagen``
+    for OGG/Opus (already used by the gateway). Anything else returns None so the
+    duration guard simply doesn't fire — the byte ceiling still applies. No
+    ffprobe subprocess here; the byte guard is the primary cost/size protection.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".wav":
+            import wave
+
+            with wave.open(path, "rb") as wf:
+                rate = wf.getframerate() or 0
+                if rate <= 0:
+                    return None
+                return wf.getnframes() / float(rate)
+        if ext in (".ogg", ".oga", ".opus"):
+            from mutagen.oggopus import OggOpus
+
+            return float(OggOpus(path).info.length)
+    except Exception:
+        return None
+    return None
+
+
 def exceeds_native_audio_limits(
     audio_paths: List[str],
     cfg: Optional[Dict[str, Any]],
@@ -183,9 +230,12 @@ def exceeds_native_audio_limits(
 ) -> Optional[str]:
     """Return a human-readable reason if any clip is too big for native, else None.
 
-    Only the byte ceiling is checked from disk here (cheap, no decode). Duration
-    is checked only when the caller supplies it (``durations`` maps path →
-    seconds) so this helper stays free of an audio-probe dependency.
+    Checks both guards:
+      * byte ceiling — cheap ``os.path.getsize`` (no decode).
+      * duration ceiling — uses ``durations`` (path → seconds) when the caller
+        supplies it, else falls back to :func:`probe_audio_duration_seconds`.
+        A clip whose duration can't be probed is allowed through on duration
+        (the byte ceiling still guards cost/size).
     """
     max_bytes = native_audio_max_bytes(cfg)
     max_seconds = native_audio_max_seconds(cfg)
@@ -196,13 +246,16 @@ def exceeds_native_audio_limits(
             continue
         if size > max_bytes:
             return f"clip {os.path.basename(raw_path)} is {size}B > {max_bytes}B native ceiling"
-        if durations:
+        dur = None
+        if durations is not None:
             dur = durations.get(raw_path)
-            if isinstance(dur, (int, float)) and dur > max_seconds:
-                return (
-                    f"clip {os.path.basename(raw_path)} is {dur:.0f}s "
-                    f"> {max_seconds}s native ceiling"
-                )
+        if dur is None:
+            dur = probe_audio_duration_seconds(raw_path)
+        if isinstance(dur, (int, float)) and dur > max_seconds:
+            return (
+                f"clip {os.path.basename(raw_path)} is {dur:.0f}s "
+                f"> {max_seconds}s native ceiling"
+            )
     return None
 
 
@@ -290,6 +343,7 @@ __all__ = [
     "decide_audio_input_mode",
     "build_native_audio_content_parts",
     "exceeds_native_audio_limits",
+    "probe_audio_duration_seconds",
     "native_audio_max_bytes",
     "native_audio_max_seconds",
     "DEFAULT_NATIVE_AUDIO_MAX_SECONDS",
