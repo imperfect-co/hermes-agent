@@ -14317,17 +14317,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("Process watcher ended (silent): %s", session_id)
             return
 
-        last_output_len = 0
         while True:
             await asyncio.sleep(interval)
 
             session = process_registry.get(session_id)
             if session is None:
                 break
-
-            current_output_len = len(session.output_buffer)
-            has_new_output = current_output_len > last_output_len
-            last_output_len = current_output_len
 
             if session.exited:
                 # --- Agent-triggered completion: inject synthetic message ---
@@ -14403,8 +14398,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             logger.error("Agent notify injection error: %s", e)
                     break
 
-                # --- Normal text-only notification ---
-                # Decide whether to notify based on mode
+                # --- Normal completion: narrate via injection, not a raw push ---
+                # Re-enter the model with the completion as a synthetic internal
+                # message (the same seam async-delegation completions use) so the
+                # agent retells it in its own voice instead of pushing a raw
+                # "[Background process …]" bracket string straight at the user.
                 should_notify = (
                     notify_mode in {"all", "result"}
                     or (notify_mode == "error" and session.exit_code not in {0, None})
@@ -14416,55 +14414,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         new_output = redact_terminal_output(
                             new_output, getattr(session, "command", "") or ""
                         )
-                    message_text = (
-                        f"[Background process {session_id} finished with exit code {session.exit_code}~ "
-                        f"Here's the final output:\n{new_output}]"
-                    )
-                    adapter = None
-                    for p, a in self.adapters.items():
-                        if p.value == platform_name:
-                            adapter = a
-                            break
-                    if adapter and chat_id:
-                        try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
-                            await adapter.send(
-                                chat_id,
-                                message_text,
-                                metadata=_non_conversational_metadata(send_meta, platform=platform_name),
-                            )
-                        except Exception as e:
-                            logger.error("Watcher delivery error: %s", e)
+                    synth_text = format_process_notification({
+                        "type": "completion",
+                        "session_id": session_id,
+                        "command": getattr(session, "command", "") or "",
+                        "exit_code": session.exit_code,
+                        "completion_reason": getattr(session, "completion_reason", "exited"),
+                        "termination_source": getattr(session, "termination_source", ""),
+                        "output": new_output,
+                    })
+                    if synth_text:
+                        await self._inject_watch_notification(synth_text, {
+                            "session_id": session_id,
+                            "session_key": session_key,
+                            "platform": platform_name,
+                            "chat_id": chat_id,
+                            "thread_id": thread_id,
+                            "user_id": user_id,
+                            "user_name": user_name,
+                            "message_id": message_id,
+                        })
                 break
-
-            elif has_new_output and notify_mode == "all" and not agent_notify:
-                # New output available -- deliver status update (only in "all" mode)
-                # Skip periodic updates for agent_notify watchers (they only care about completion)
-                new_output = session.output_buffer[-500:] if session.output_buffer else ""
-                if new_output:
-                    from agent.redact import redact_terminal_output
-                    new_output = redact_terminal_output(
-                        new_output, getattr(session, "command", "") or ""
-                    )
-                message_text = (
-                    f"[Background process {session_id} is still running~ "
-                    f"New output:\n{new_output}]"
-                )
-                adapter = None
-                for p, a in self.adapters.items():
-                    if p.value == platform_name:
-                        adapter = a
-                        break
-                if adapter and chat_id:
-                    try:
-                        send_meta = {"thread_id": thread_id} if thread_id else None
-                        await adapter.send(
-                            chat_id,
-                            message_text,
-                            metadata=_non_conversational_metadata(send_meta, platform=platform_name),
-                        )
-                    except Exception as e:
-                        logger.error("Watcher delivery error: %s", e)
 
         logger.debug("Process watcher ended: %s", session_id)
 
