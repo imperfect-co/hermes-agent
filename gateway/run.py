@@ -15439,7 +15439,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-platform display settings — resolve via display_config module
         # which checks display.platforms.<platform>.<key> first, then
         # display.<key> global, then built-in platform defaults.
-        from gateway.display_config import resolve_display_setting
+        from gateway.display_config import (
+            quiet_heartbeat_text,
+            resolve_display_setting,
+        )
 
         # Apply tool preview length config (0 = no limit)
         try:
@@ -17486,7 +17489,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         ):
             _NOTIFY_INTERVAL = None
-        _notify_start = time.time()
+        # Monotonic: the heartbeat measures elapsed turn duration, so it must
+        # not regress if the wall clock steps backward (NTP / manual change).
+        _notify_start = time.monotonic()
 
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
@@ -17500,6 +17505,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # interval. Falls back to send-new when edit fails or isn't
             # supported by the adapter.
             _heartbeat_msg_id: Optional[str] = None
+            # Heartbeat copy style. "timer" (default) keeps the
+            # "⏳ Working — N min" elapsed counter; "quiet" swaps in calm
+            # soft-escalation copy ("working on it" → "still on it" →
+            # "still going") with no timer or per-tool detail.
+            _heartbeat_style = str(
+                resolve_display_setting(
+                    user_config,
+                    platform_key,
+                    "heartbeat_style",
+                    "timer",
+                )
+            ).lower()
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
                 # Stop heartbeating once this run no longer owns the session
@@ -17516,37 +17533,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_key, agent_holder[0], _exec_ref
                 ):
                     break
-                _elapsed_mins = int((time.time() - _notify_start) // 60)
-                # Include agent activity context if available. Default
-                # heartbeat is terse: elapsed + current tool. Verbose
-                # iteration counter is gated on busy_ack_detail so users
-                # who want it can opt in per platform.
-                _agent_ref = agent_holder[0]
-                _status_detail = ""
-                _want_iteration_detail = bool(
-                    resolve_display_setting(
-                        user_config,
-                        platform_key,
-                        "busy_ack_detail",
-                        True,
+                if _heartbeat_style == "quiet":
+                    # Quiet style: calm soft-escalation copy keyed off elapsed
+                    # time. Deliberately omits the iteration/tool detail —
+                    # staying quiet is the whole point.
+                    _heartbeat_text = quiet_heartbeat_text(
+                        time.monotonic() - _notify_start
                     )
-                )
-                if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
-                    try:
-                        _a = _agent_ref.get_activity_summary()
-                        _parts = []
-                        if _want_iteration_detail:
-                            _parts.append(
-                                f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
-                            )
-                        _action = _a.get("current_tool") or _a.get("last_activity_desc")
-                        if _action:
-                            _parts.append(str(_action))
-                        if _parts:
-                            _status_detail = " — " + ", ".join(_parts)
-                    except Exception:
-                        pass
-                _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                else:
+                    _elapsed_mins = int((time.monotonic() - _notify_start) // 60)
+                    # Include agent activity context if available. Default
+                    # heartbeat is terse: elapsed + current tool. Verbose
+                    # iteration counter is gated on busy_ack_detail so users
+                    # who want it can opt in per platform.
+                    _agent_ref = agent_holder[0]
+                    _status_detail = ""
+                    _want_iteration_detail = bool(
+                        resolve_display_setting(
+                            user_config,
+                            platform_key,
+                            "busy_ack_detail",
+                            True,
+                        )
+                    )
+                    if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
+                        try:
+                            _a = _agent_ref.get_activity_summary()
+                            _parts = []
+                            if _want_iteration_detail:
+                                _parts.append(
+                                    f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
+                                )
+                            _action = _a.get("current_tool") or _a.get("last_activity_desc")
+                            if _action:
+                                _parts.append(str(_action))
+                            if _parts:
+                                _status_detail = " — " + ", ".join(_parts)
+                        except Exception:
+                            pass
+                    _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:
