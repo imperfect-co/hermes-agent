@@ -1,0 +1,125 @@
+name: Sync upstream (NousResearch/hermes-agent)
+
+# Keeps this fork current with upstream NousResearch/hermes-agent by opening a
+# pull request — never by pushing to main directly. Two reasons it is a PR and
+# not a push:
+#   1. The `Require pull request to default branch` ruleset blocks direct
+#      pushes to main, so a push-to-main sync would fail every run.
+#   2. A PR keeps the CodeRabbit review (and a human merge) in the loop, so
+#      external upstream commits cannot land on the branch prod runs from
+#      without being seen.
+#
+# Only one sync PR is in flight at a time: if a sync PR is already open the run
+# skips entirely, so it never resets over a human's in-progress conflict
+# resolution on the sync branch. The merge is plain `git merge` — no rebase, no
+# history rewrite of main, no auto-resolution of conflicts; a conflicted tree is
+# committed so the PR diff shows exactly what needs hand resolution.
+#
+# Known limitation: the Actions `GITHUB_TOKEN` cannot push changes to files
+# under `.github/workflows/` (GitHub gates workflow files behind a separate
+# permission). If an upstream sync touches workflow files the push step fails;
+# that run needs a human to push the branch over SSH (as the maintainer does
+# for this very file). Non-workflow upstream changes sync automatically.
+
+on:
+  schedule:
+    - cron: "0 11 * * *" # daily, ~04:00 PT
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # push the sync branch
+  pull-requests: write # open the sync PR
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false # never interrupt a merge mid-flight
+
+env:
+  UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
+  SYNC_BRANCH: automation/upstream-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main (full history; pinned to main, not the dispatch ref)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main # a manual dispatch must still sync onto main, never the caller's ref
+          fetch-depth: 0
+
+      - name: Skip if a sync PR is already open
+        id: guard
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            echo "Sync PR #${EXISTING} already open — resolve/merge it before the next sync. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch upstream and count new commits
+        id: upstream
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --quiet upstream
+
+          # Resolve upstream's default branch (main vs master) rather than assume.
+          UPSTREAM_BRANCH="$(git remote show upstream | sed -n '/HEAD branch/s/.*: //p')"
+          echo "upstream_branch=${UPSTREAM_BRANCH}" >> "$GITHUB_OUTPUT"
+
+          AHEAD="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}")"
+          echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "Upstream branch ${UPSTREAM_BRANCH}: ${AHEAD} new commit(s) ahead of fork main."
+
+      - name: Merge upstream onto a fresh sync branch
+        id: merge
+        if: steps.guard.outputs.skip == 'false' && steps.upstream.outputs.ahead != '0'
+        env:
+          # Routed through env so the value is never interpolated into the
+          # script text before Bash parses it (no shell-injection surface).
+          UPSTREAM_BRANCH: ${{ steps.upstream.outputs.upstream_branch }}
+        run: |
+          set -euo pipefail
+          # The guard above guarantees no sync PR is open, so the sync branch
+          # holds no in-flight human work — safe to (re)create it from main.
+          git fetch origin "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
+          git switch -C "$SYNC_BRANCH" # from current HEAD (main)
+
+          if git merge --no-edit --no-ff "upstream/${UPSTREAM_BRANCH}"; then
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
+          else
+            # Record the conflicted tree so the PR diff is reviewable, then let a
+            # human resolve on the branch. core.editor=true skips the commit editor.
+            git add -A
+            git -c core.editor=true commit -m "merge upstream/${UPSTREAM_BRANCH} (CONFLICTS — resolve before merge)"
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push --force-with-lease origin "$SYNC_BRANCH"
+
+      - name: Open the sync PR
+        if: steps.guard.outputs.skip == 'false' && steps.upstream.outputs.ahead != '0'
+        run: |
+          set -euo pipefail
+          # Single-quoted body: robust under YAML dedent and the prose has no
+          # apostrophes to escape.
+          gh pr create \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync upstream NousResearch/hermes-agent" \
+            --body 'Automated upstream sync from `NousResearch/hermes-agent`, opened by the `sync-upstream` workflow. Merges upstream into the `automation/upstream-sync` branch and opens this PR rather than pushing to main.
+
+          - Review the diff and let CodeRabbit pass before merging.
+          - If the diff shows conflict markers, resolve them on the branch first (the merge intentionally does not auto-resolve). The next daily run skips while this PR is open, so it will not overwrite your resolution.
+          - If this run touched files under `.github/workflows/`, the automated push will have failed and a maintainer must push the branch over SSH.'
