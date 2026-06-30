@@ -1544,6 +1544,9 @@ Hashes are deterministic — the same user always maps to the same hash, so the 
 ```yaml
 stt:
   provider: "local"            # "local" | "groq" | "openai" | "mistral"
+  native_audio: "auto"         # auto | always | never (see "Native audio" below)
+  native_audio_max_seconds: 600        # clips longer than this fall back to STT
+  native_audio_max_bytes: 20971520     # 20 MiB; larger clips fall back to STT
   local:
     model: "base"              # tiny, base, small, medium, large-v3
   openai:
@@ -1558,6 +1561,33 @@ Provider behavior:
 - `openai` uses the OpenAI speech API and reads `VOICE_TOOLS_OPENAI_KEY`.
 
 If the requested provider is unavailable, Hermes falls back automatically in this order: `local` → `groq` → `openai`.
+
+### Native audio
+
+When the active model is natively multimodal and accepts audio input (e.g.
+Gemini Flash), Hermes can feed the **raw voice bytes directly to the model**
+instead of transcribing first. The model then hears signal a transcript
+discards — prosody, emotion, hesitation, code-switching, and background audio —
+and STT is skipped for that turn. This mirrors the native-image routing
+controlled by `agent.image_input_mode`.
+
+`stt.native_audio` selects the routing:
+
+- `auto` (default) — attach audio natively when the active model reports audio
+  input support in its [models.dev](https://models.dev) metadata; otherwise
+  transcribe (the pre-existing behaviour).
+- `always` — force native attachment regardless of capability metadata (useful
+  for custom/local audio-capable models whose metadata is missing).
+- `never` — always transcribe; never attach audio natively.
+
+Two guards force STT even when native is selected, because audio tokens can
+dwarf a transcript on long clips and inline audio has a provider size ceiling:
+
+- `native_audio_max_seconds` (default `600`) — clips longer than this transcribe instead.
+- `native_audio_max_bytes` (default `20971520`, 20 MiB) — clips larger than this transcribe instead.
+
+Native audio works only for providers whose adapter translates the audio part;
+today that is the native Gemini adapter. Other providers continue to use STT.
 
 Groq and OpenAI model overrides are environment-driven:
 
