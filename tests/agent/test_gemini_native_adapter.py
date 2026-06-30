@@ -408,3 +408,96 @@ def test_explicit_max_tokens_is_respected():
 
     req = build_gemini_request(messages=[{"role": "user", "content": "hi"}], max_tokens=4096)
     assert req["generationConfig"]["maxOutputTokens"] == 4096
+
+
+# ─── native audio: input_audio / audio → inlineData ──────────────────────────
+
+
+def test_extract_multimodal_parts_input_audio_raw_base64_to_inline_data():
+    """OpenAI-style input_audio (raw b64 + format) → Gemini inlineData."""
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    b64 = base64.b64encode(b"oggbytes").decode("ascii")
+    parts = _extract_multimodal_parts(
+        [
+            {"type": "text", "text": "what tone is this?"},
+            {"type": "input_audio", "input_audio": {"data": b64, "format": "ogg"}},
+        ]
+    )
+    assert {"text": "what tone is this?"} in parts
+    inline = [p for p in parts if "inlineData" in p]
+    assert len(inline) == 1
+    assert inline[0]["inlineData"]["mimeType"] == "audio/ogg"
+    assert inline[0]["inlineData"]["data"] == b64
+
+
+def test_extract_multimodal_parts_audio_data_url_to_inline_data():
+    """A data: URL audio part is decoded and re-emitted like the image branch."""
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    raw = b"RIFFfakewav"
+    durl = "data:audio/wav;base64," + base64.b64encode(raw).decode("ascii")
+    parts = _extract_multimodal_parts([{"type": "audio", "audio": {"url": durl}}])
+    assert len(parts) == 1
+    assert parts[0]["inlineData"]["mimeType"] == "audio/wav"
+    assert parts[0]["inlineData"]["data"] == base64.b64encode(raw).decode("ascii")
+
+
+def test_extract_multimodal_parts_input_audio_format_maps_to_mime():
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    b64 = base64.b64encode(b"mp3bytes").decode("ascii")
+    parts = _extract_multimodal_parts(
+        [{"type": "input_audio", "input_audio": {"data": b64, "format": "mp3"}}]
+    )
+    assert parts[0]["inlineData"]["mimeType"] == "audio/mp3"
+
+
+def test_extract_multimodal_parts_input_audio_missing_format_defaults_ogg():
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    b64 = base64.b64encode(b"unknownfmt").decode("ascii")
+    parts = _extract_multimodal_parts(
+        [{"type": "input_audio", "input_audio": {"data": b64}}]
+    )
+    assert parts[0]["inlineData"]["mimeType"] == "audio/ogg"
+
+
+def test_extract_multimodal_parts_invalid_audio_base64_is_skipped():
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    parts = _extract_multimodal_parts(
+        [
+            {"type": "text", "text": "keep me"},
+            {"type": "input_audio", "input_audio": {"data": "!!!not base64!!!", "format": "ogg"}},
+        ]
+    )
+    # The text part survives; the un-decodable audio part is dropped.
+    assert parts == [{"text": "keep me"}]
+
+
+def test_extract_multimodal_parts_text_and_image_still_work():
+    """Regression: the existing text/image branches are unchanged."""
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    raw = b"\x89PNG\r\n\x1a\nfake"
+    durl = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+    parts = _extract_multimodal_parts(
+        [
+            {"type": "text", "text": "hi"},
+            {"type": "image_url", "image_url": {"url": durl}},
+        ]
+    )
+    assert {"text": "hi"} in parts
+    img = [p for p in parts if "inlineData" in p]
+    assert img[0]["inlineData"]["mimeType"] == "image/png"

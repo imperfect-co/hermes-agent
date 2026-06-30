@@ -40,6 +40,26 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # an omitted limit means full budget).
 GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
 
+# OpenAI-style ``input_audio`` parts carry a short ``format`` token instead of
+# a full MIME type. Map the tokens Gemini accepts to their inlineData MIME so
+# raw base64 audio (no ``data:`` prefix) can still be ingested natively.
+_AUDIO_FORMAT_TO_MIME = {
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "opus": "audio/ogg",
+    "mp3": "audio/mp3",
+    "mpeg": "audio/mp3",
+    "mpga": "audio/mp3",
+    "wav": "audio/wav",
+    "x-wav": "audio/wav",
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "aac": "audio/aac",
+    "flac": "audio/flac",
+    "webm": "audio/webm",
+    "aiff": "audio/aiff",
+}
+
 
 def bare_gemini_model_id(model: str) -> str:
     """Strip Gemini's own provider prefix from an aggregator-style model id."""
@@ -191,6 +211,20 @@ def _coerce_content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _data_url_to_inline_data(url: str) -> Optional[Dict[str, Any]]:
+    """Decode a ``data:<mime>;base64,<payload>`` URL into a Gemini ``inlineData``
+    part. Returns None when the URL isn't a decodable data URL."""
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    try:
+        header, encoded = url.split(",", 1)
+        mime = header.split(":", 1)[1].split(";", 1)[0]
+        raw = base64.b64decode(encoded)
+    except Exception:
+        return None
+    return {"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}}
+
+
 def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
     if not isinstance(content, list):
         text = _coerce_content_to_text(content)
@@ -209,23 +243,46 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
             if isinstance(text, str) and text:
                 parts.append({"text": text})
         elif ptype == "image_url":
-            url = ((item.get("image_url") or {}).get("url") or "")
-            if not isinstance(url, str) or not url.startswith("data:"):
+            inline = _data_url_to_inline_data((item.get("image_url") or {}).get("url") or "")
+            if inline is not None:
+                parts.append(inline)
+        elif ptype in {"input_audio", "audio"}:
+            # Native audio ingestion. Gemini accepts audio via the same
+            # ``inlineData`` (mimeType + base64) shape as images, so this
+            # mirrors the ``image_url`` branch above. The OpenAI-style
+            # ``input_audio`` part carries raw base64 + a short ``format``
+            # token (e.g. "ogg", "wav"); ``audio`` may instead carry a
+            # ``data:`` URL like images do. Accept both.
+            block = item.get(ptype) or {}
+            if not isinstance(block, dict):
                 continue
-            try:
-                header, encoded = url.split(",", 1)
-                mime = header.split(":", 1)[1].split(";", 1)[0]
-                raw = base64.b64decode(encoded)
-            except Exception:
+            data_field = block.get("data") or block.get("url") or ""
+            if not isinstance(data_field, str) or not data_field:
                 continue
-            parts.append(
-                {
-                    "inlineData": {
-                        "mimeType": mime,
-                        "data": base64.b64encode(raw).decode("ascii"),
+            if data_field.startswith("data:"):
+                inline = _data_url_to_inline_data(data_field)
+                if inline is not None:
+                    parts.append(inline)
+            else:
+                # Raw base64 payload. Derive the MIME from the ``format``
+                # token (OpenAI's ``input_audio`` carries "ogg"/"wav"/…);
+                # default to audio/ogg (WhatsApp voice notes) when absent.
+                fmt = str(block.get("format") or "").strip().lower()
+                mime = block.get("mime_type") or block.get("mimeType")
+                if not isinstance(mime, str) or not mime:
+                    mime = _AUDIO_FORMAT_TO_MIME.get(fmt, "audio/ogg")
+                try:
+                    base64.b64decode(data_field, validate=True)
+                except Exception:
+                    continue
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": mime,
+                            "data": data_field,
+                        }
                     }
-                }
-            )
+                )
     return parts
 
 

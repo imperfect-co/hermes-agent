@@ -1,0 +1,221 @@
+"""Tests for agent/audio_routing.py — per-turn native-audio-vs-STT routing."""
+
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+from unittest.mock import patch
+
+from agent.audio_routing import (
+    DEFAULT_NATIVE_AUDIO_MAX_BYTES,
+    DEFAULT_NATIVE_AUDIO_MAX_SECONDS,
+    _coerce_mode,
+    _guess_audio_format,
+    build_native_audio_content_parts,
+    decide_audio_input_mode,
+    exceeds_native_audio_limits,
+    native_audio_max_bytes,
+    native_audio_max_seconds,
+)
+
+
+# ─── _coerce_mode ────────────────────────────────────────────────────────────
+
+
+class TestCoerceMode:
+    def test_valid_modes_pass_through(self):
+        assert _coerce_mode("auto") == "auto"
+        assert _coerce_mode("always") == "always"
+        assert _coerce_mode("never") == "never"
+
+    def test_case_insensitive_and_strip(self):
+        assert _coerce_mode("ALWAYS") == "always"
+        assert _coerce_mode("  never ") == "never"
+
+    def test_invalid_falls_back_to_auto(self):
+        assert _coerce_mode("nonsense") == "auto"
+        assert _coerce_mode("") == "auto"
+        assert _coerce_mode(None) == "auto"
+        assert _coerce_mode(42) == "auto"
+
+
+# ─── decide_audio_input_mode (decision table) ────────────────────────────────
+
+
+class TestDecideAudioInputMode:
+    def test_never_forces_stt_even_for_audio_model(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert (
+                decide_audio_input_mode(
+                    "gemini", "gemini-3.5-flash", {"stt": {"native_audio": "never"}}
+                )
+                == "stt"
+            )
+
+    def test_always_forces_native_even_for_unknown_model(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=None):
+            assert (
+                decide_audio_input_mode(
+                    "custom", "my-local-model", {"stt": {"native_audio": "always"}}
+                )
+                == "native"
+            )
+
+    def test_auto_native_when_model_supports_audio(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert (
+                decide_audio_input_mode(
+                    "gemini", "gemini-3.5-flash", {"stt": {"native_audio": "auto"}}
+                )
+                == "native"
+            )
+
+    def test_auto_stt_when_model_lacks_audio(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=False):
+            assert (
+                decide_audio_input_mode("openai", "gpt-4", {"stt": {"native_audio": "auto"}})
+                == "stt"
+            )
+
+    def test_auto_stt_when_capability_unknown(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=None):
+            assert decide_audio_input_mode("x", "y", {"stt": {"native_audio": "auto"}}) == "stt"
+
+    def test_none_config_behaves_as_auto(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=True):
+            assert decide_audio_input_mode("gemini", "gemini-3.5-flash", None) == "native"
+
+    def test_missing_stt_block_behaves_as_auto(self):
+        with patch("agent.audio_routing._lookup_supports_audio", return_value=False):
+            assert decide_audio_input_mode("openai", "gpt-4", {"agent": {}}) == "stt"
+
+
+# ─── capability lookup wiring (uses ModelInfo.supports_audio_input) ──────────
+
+
+class TestLookupSupportsAudio:
+    def test_reads_supports_audio_input_from_model_info(self):
+        from agent.audio_routing import _lookup_supports_audio
+
+        class _Info:
+            def supports_audio_input(self):
+                return True
+
+        with patch("agent.models_dev.get_model_info", return_value=_Info()):
+            assert _lookup_supports_audio("gemini", "gemini-3.5-flash") is True
+
+    def test_unknown_model_returns_none(self):
+        from agent.audio_routing import _lookup_supports_audio
+
+        with patch("agent.models_dev.get_model_info", return_value=None):
+            assert _lookup_supports_audio("gemini", "nope") is None
+
+    def test_blank_args_short_circuit(self):
+        from agent.audio_routing import _lookup_supports_audio
+
+        assert _lookup_supports_audio("", "model") is None
+        assert _lookup_supports_audio("gemini", "") is None
+
+
+# ─── size/duration guards ────────────────────────────────────────────────────
+
+
+class TestGuards:
+    def test_defaults_when_no_config(self):
+        assert native_audio_max_bytes(None) == DEFAULT_NATIVE_AUDIO_MAX_BYTES
+        assert native_audio_max_seconds(None) == DEFAULT_NATIVE_AUDIO_MAX_SECONDS
+
+    def test_config_overrides_guards(self):
+        cfg = {"stt": {"native_audio_max_bytes": 123, "native_audio_max_seconds": 9}}
+        assert native_audio_max_bytes(cfg) == 123
+        assert native_audio_max_seconds(cfg) == 9
+
+    def test_bool_is_rejected_as_guard(self):
+        # bool is an int subclass; must not be honoured as a byte ceiling.
+        cfg = {"stt": {"native_audio_max_bytes": True}}
+        assert native_audio_max_bytes(cfg) == DEFAULT_NATIVE_AUDIO_MAX_BYTES
+
+    def test_exceeds_byte_ceiling(self, tmp_path: Path):
+        clip = tmp_path / "big.ogg"
+        clip.write_bytes(b"x" * 100)
+        reason = exceeds_native_audio_limits([str(clip)], {"stt": {"native_audio_max_bytes": 50}})
+        assert reason is not None and "native ceiling" in reason
+
+    def test_within_byte_ceiling_returns_none(self, tmp_path: Path):
+        clip = tmp_path / "ok.ogg"
+        clip.write_bytes(b"x" * 100)
+        assert (
+            exceeds_native_audio_limits([str(clip)], {"stt": {"native_audio_max_bytes": 200}})
+            is None
+        )
+
+    def test_duration_ceiling_when_supplied(self, tmp_path: Path):
+        clip = tmp_path / "long.ogg"
+        clip.write_bytes(b"x" * 10)
+        reason = exceeds_native_audio_limits(
+            [str(clip)],
+            {"stt": {"native_audio_max_seconds": 30}},
+            durations={str(clip): 120.0},
+        )
+        assert reason is not None and "native ceiling" in reason
+
+    def test_missing_file_is_skipped_not_crash(self):
+        assert exceeds_native_audio_limits(["/nope/missing.ogg"], None) is None
+
+
+# ─── _guess_audio_format ─────────────────────────────────────────────────────
+
+
+class TestGuessAudioFormat:
+    def test_common_extensions(self):
+        assert _guess_audio_format(Path("a.ogg")) == "ogg"
+        assert _guess_audio_format(Path("a.opus")) == "ogg"
+        assert _guess_audio_format(Path("a.mp3")) == "mp3"
+        assert _guess_audio_format(Path("a.wav")) == "wav"
+        assert _guess_audio_format(Path("a.m4a")) == "m4a"
+
+    def test_unknown_extension_defaults_to_ogg(self):
+        assert _guess_audio_format(Path("a.weirdext")) == "ogg"
+
+
+# ─── build_native_audio_content_parts ────────────────────────────────────────
+
+
+class TestBuildNativeAudioContentParts:
+    def test_emits_text_then_input_audio(self, tmp_path: Path):
+        clip = tmp_path / "voice.ogg"
+        clip.write_bytes(b"oggbytes")
+        parts, skipped = build_native_audio_content_parts("how do I do X?", [str(clip)])
+        assert skipped == []
+        assert parts[0]["type"] == "text"
+        assert "how do I do X?" in parts[0]["text"]
+        assert f"[Voice message attached: {clip}]" in parts[0]["text"]
+        assert parts[1]["type"] == "input_audio"
+        assert parts[1]["input_audio"]["format"] == "ogg"
+        assert parts[1]["input_audio"]["data"] == base64.b64encode(b"oggbytes").decode("ascii")
+
+    def test_empty_caption_gets_default_prompt(self, tmp_path: Path):
+        clip = tmp_path / "voice.wav"
+        clip.write_bytes(b"RIFFdata")
+        parts, _ = build_native_audio_content_parts("", [str(clip)])
+        assert parts[0]["type"] == "text"
+        assert parts[0]["text"].startswith("Listen to this voice message")
+
+    def test_missing_path_is_skipped(self, tmp_path: Path):
+        good = tmp_path / "ok.ogg"
+        good.write_bytes(b"data")
+        parts, skipped = build_native_audio_content_parts("hi", [str(good), "/nope.ogg"])
+        assert skipped == ["/nope.ogg"]
+        assert sum(1 for p in parts if p["type"] == "input_audio") == 1
+
+    def test_all_unreadable_falls_back_to_text_only(self):
+        parts, skipped = build_native_audio_content_parts("just text", ["/nope.ogg"])
+        assert skipped == ["/nope.ogg"]
+        assert parts == [{"type": "text", "text": "just text"}]
+
+    def test_empty_file_is_skipped(self, tmp_path: Path):
+        clip = tmp_path / "empty.ogg"
+        clip.write_bytes(b"")
+        parts, skipped = build_native_audio_content_parts("hi", [str(clip)])
+        assert skipped == [str(clip)]
+        assert all(p["type"] != "input_audio" for p in parts)
