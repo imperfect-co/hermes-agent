@@ -3040,6 +3040,9 @@ class SlackAdapter(BasePlatformAdapter):
             user_id=user_id,
             user_name=user_name,
             thread_id=thread_ts,
+            # Anchor the triggering message ts so reply/react features can target
+            # the message that started this turn (exposed via HERMES_SESSION_MESSAGE_ID).
+            message_id=ts,
         )
 
         # Per-channel ephemeral prompt

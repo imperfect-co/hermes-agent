@@ -1,0 +1,20 @@
+name: slack_react
+version: 2.0.0
+description: >-
+  Emoji reactions for Slack and WhatsApp. Lets the agent use its own judgment to
+  react to the triggering message with an emoji (e.g. :+1: for "thanks" or
+  "issue fixed") instead of — or in addition to — a text reply, via a
+  `[[react:EMOJI]]` control directive. The pre_llm_call hook teaches the policy;
+  the transform_llm_output hook acts on the directive, firing the platform's
+  native reaction API (Slack reactions.add / WhatsApp Baileys react) on the
+  message that triggered the turn and using the gateway's built-in NO_REPLY
+  silence token to suppress the text message when only a reaction is wanted.
+author: matin
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+hooks:
+  - pre_llm_call
+  - transform_llm_output

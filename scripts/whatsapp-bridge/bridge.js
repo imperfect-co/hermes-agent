@@ -512,6 +512,9 @@ async function startSocket() {
 
       const event = {
         messageId: msg.key.id,
+        // Whether the bot's own account sent this message. Needed to rebuild
+        // the Baileys message key when reacting (POST /react).
+        fromMe: !!msg.key.fromMe,
         chatId,
         senderId,
         senderName: msg.pushName || senderNumber,
@@ -642,6 +645,29 @@ app.post('/edit', async (req, res) => {
     }
 
     res.json({ success: true, messageIds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// React to a message. An empty `emoji` string removes the bot's reaction.
+// The message key is rebuilt from messageId + chatId (remoteJid); a group
+// message also needs `participant` (the sender JID) to route correctly.
+app.post('/react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId, emoji, fromMe = false, participant } = req.body;
+  if (!chatId || !messageId || typeof emoji !== 'string') {
+    return res.status(400).json({ error: 'chatId, messageId, and emoji are required' });
+  }
+
+  try {
+    const key = { id: messageId, fromMe: !!fromMe, remoteJid: chatId };
+    if (participant) key.participant = participant;
+    const sent = await sendWithTimeout(chatId, { react: { text: emoji, key } });
+    res.json({ success: true, messageId: sent?.key?.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
