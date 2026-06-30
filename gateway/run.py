@@ -44,7 +44,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Any, List, Union
+from typing import Dict, Optional, Any, List, Tuple, Union
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -2673,6 +2673,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # preserve the queue.
         self._queued_events: Dict[str, List[MessageEvent]] = {}
         self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
+        self._pending_native_audio_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
         # Startup restore gate: while restart-interrupted sessions are being
@@ -9426,6 +9427,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Reset only this session's per-call buffer; other sessions may be
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
+        self._consume_pending_native_audio_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
@@ -9496,6 +9498,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
 
             if audio_paths:
+                # Route voice/audio: native (model hears the bytes — prosody,
+                # emotion, code-switching) vs stt (transcribe up front, the
+                # pre-existing behaviour). See agent/audio_routing.py. Native
+                # buffers the paths for inline attachment at the
+                # run_conversation call site (exactly like native images) and
+                # skips STT entirely.
+                _audio_mode, _audio_fallback_reason = self._decide_audio_input_mode(audio_paths)
+            if audio_paths and _audio_mode == "native":
+                pending_native_audio = getattr(self, "_pending_native_audio_paths_by_session", None)
+                if pending_native_audio is None:
+                    pending_native_audio = {}
+                    self._pending_native_audio_paths_by_session = pending_native_audio
+                pending_native_audio[session_key] = list(audio_paths)
+                logger.info(
+                    "Audio routing: native (model supports audio). "
+                    "%d clip(s) will be attached inline; STT skipped.",
+                    len(audio_paths),
+                )
+            elif audio_paths:
+                if _audio_fallback_reason:
+                    logger.info(
+                        "Audio routing: stt fallback (native eligible but %s).",
+                        _audio_fallback_reason,
+                    )
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
                     message_text,
                     audio_paths,
@@ -9694,6 +9720,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+        if not pending_native:
+            return []
+        return list(pending_native.pop(session_key, []) or [])
+
+    def _consume_pending_native_audio_paths(self, session_key: str) -> List[str]:
+        pending_native = getattr(self, "_pending_native_audio_paths_by_session", None)
         if not pending_native:
             return []
         return list(pending_native.pop(session_key, []) or [])
@@ -13780,6 +13812,64 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
+    def _decide_audio_input_mode(self, audio_paths: List[str]) -> Tuple[str, Optional[str]]:
+        """Resolve voice/audio routing for the currently active model.
+
+        Returns ``(mode, fallback_reason)`` where ``mode`` is ``"native"``
+        (attach the raw audio on the user turn so the model hears prosody /
+        emotion / code-switching) or ``"stt"`` (transcribe up front, the
+        pre-existing behaviour). ``fallback_reason`` is set only when native
+        was eligible but a size/duration guard forced STT instead, so callers
+        can surface it in telemetry.
+
+        Active provider/model are read from config so the decision tracks
+        ``/model`` switches automatically, exactly like image routing.
+        """
+        try:
+            from agent.audio_routing import (
+                decide_audio_input_mode,
+                exceeds_native_audio_limits,
+            )
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            provider = _read_main_provider()
+            model = _read_main_model()
+            mode = decide_audio_input_mode(provider, model, cfg)
+            if mode != "native":
+                return "stt", None
+            reason = exceeds_native_audio_limits(audio_paths, cfg)
+            if reason:
+                return "stt", reason
+            return "native", None
+        except Exception as exc:
+            logger.debug("audio_routing: decision failed, falling back to STT — %s", exc)
+            return "stt", None
+
+    def _native_audio_active(self) -> bool:
+        """True when the active model routes voice natively (model-level only).
+
+        Used by the queued/interrupt STT sites, which feed a *text* string into
+        the mid-run interrupt machinery and cannot attach audio bytes. When
+        native is active they skip the (now-pointless) STT call and emit a
+        lightweight placeholder instead; the buffered audio is attached when the
+        queued event is re-processed through _prepare_inbound_message_text. No
+        size guard here — these sites have no path-size context and never buffer.
+        """
+        try:
+            from agent.audio_routing import decide_audio_input_mode
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            return decide_audio_input_mode(
+                _read_main_provider(), _read_main_model(), cfg
+            ) == "native"
+        except Exception as exc:
+            logger.debug("audio_routing: native check failed, assuming STT — %s", exc)
+            return False
+
     async def _enrich_message_with_vision(
         self,
         user_text: str,
@@ -13976,7 +14066,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if is_audio:
                 audio_paths.append(path)
 
-        if audio_paths:
+        # When native audio is active, skip STT here: this dequeue path returns
+        # a text string for the interrupt machinery and cannot attach bytes. The
+        # audio is attached natively when the event re-routes through
+        # _prepare_inbound_message_text. Emit a placeholder so the turn isn't empty.
+        if audio_paths and not self._native_audio_active():
             enriched_text, successful_transcripts = await self._enrich_message_with_transcription(
                 text, audio_paths,
             )
@@ -17101,6 +17195,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 else:
                     _run_message = message
 
+                # Native audio: buffered by _prepare_inbound_message_text when
+                # the active model can hear. Merge the audio parts alongside any
+                # image parts so a turn can carry text + image + audio together.
+                # The provider adapter (Gemini) translates input_audio →
+                # inlineData. Consume-and-clear like images.
+                _native_audio = self._consume_pending_native_audio_paths(session_key)
+                if _native_audio:
+                    try:
+                        from agent.audio_routing import build_native_audio_content_parts
+                        _audio_parts, _audio_skipped = build_native_audio_content_parts(
+                            message,
+                            _native_audio,
+                        )
+                        if _audio_skipped:
+                            logger.warning(
+                                "Native audio attachment: skipped %d unreadable path(s): %s",
+                                len(_audio_skipped), _audio_skipped,
+                            )
+                        _audio_only_parts = [
+                            p for p in _audio_parts if p.get("type") == "input_audio"
+                        ]
+                        if _audio_only_parts:
+                            if isinstance(_run_message, list):
+                                # Already a multimodal parts list (e.g. images):
+                                # append audio parts without duplicating the text
+                                # part the image builder already produced.
+                                _run_message.extend(_audio_only_parts)
+                            else:
+                                # Plain text turn → use the audio builder's full
+                                # parts list (text hint + audio).
+                                _run_message = _audio_parts
+                        # else: all clips failed to read — leave _run_message
+                        # as-is (text only); the model still gets the caption.
+                    except Exception as _audio_exc:
+                        logger.warning(
+                            "Native audio attachment failed, falling back to text: %s",
+                            _audio_exc,
+                        )
+
                 _api_run_message = _wrap_current_message_with_observed_context(
                     _run_message,
                     observed_group_context,
@@ -17455,7 +17588,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     )
                                     if _is_audio:
                                         _audio_paths.append(_path)
-                                if _audio_paths:
+                                # Native audio active → skip STT (the interrupt
+                                # carries text only; the audio is attached when
+                                # the queued event re-routes through
+                                # _prepare_inbound_message_text). Fall to the
+                                # placeholder so the interrupt isn't empty.
+                                if _audio_paths and not self._native_audio_active():
                                     try:
                                         _enriched, _transcripts = await self._enrich_message_with_transcription(
                                             pending_text, _audio_paths,
@@ -17875,7 +18013,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         if _is_audio:
                             _audio_paths.append(_path)
-                    if _audio_paths:
+                    # Native audio active → skip STT. This dequeued event is
+                    # re-routed through _prepare_inbound_message_text on re-entry,
+                    # which buffers the audio for native inline attachment; running
+                    # STT here would be wasted work and its transcript discarded.
+                    if _audio_paths and not self._native_audio_active():
                         try:
                             _enriched, _transcripts = await self._enrich_message_with_transcription(
                                 _pending_text, _audio_paths,

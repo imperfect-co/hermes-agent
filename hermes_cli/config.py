@@ -1996,6 +1996,18 @@ DEFAULT_CONFIG = {
     
     "stt": {
         "enabled": True,
+        # native_audio: route voice/audio to the model natively (it hears
+        # prosody/emotion/code-switching) instead of transcribing first.
+        #   auto   = native when the active model reports audio input support,
+        #            else STT (the pre-existing behaviour). [default]
+        #   always = force native regardless of capability metadata.
+        #   never  = always STT.
+        "native_audio": "auto",
+        # Guards: a clip past either ceiling falls back to STT even when native
+        # is selected (audio tokens dwarf a transcript on long clips; Gemini's
+        # inline audio ceiling is 20 MB — larger clips need the Files API).
+        "native_audio_max_seconds": 600,
+        "native_audio_max_bytes": 20971520,  # 20 MiB
         "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "elevenlabs" (Scribe)
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
