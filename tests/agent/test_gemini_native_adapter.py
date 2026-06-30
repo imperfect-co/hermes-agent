@@ -471,6 +471,44 @@ def test_extract_multimodal_parts_input_audio_missing_format_defaults_ogg():
     assert parts[0]["inlineData"]["mimeType"] == "audio/ogg"
 
 
+def test_extract_multimodal_parts_input_audio_explicit_mime_type_wins():
+    """An explicit mime_type on the block overrides the format-token mapping."""
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    b64 = base64.b64encode(b"bytes").decode("ascii")
+    parts = _extract_multimodal_parts(
+        [{"type": "input_audio", "input_audio": {"data": b64, "mime_type": "audio/flac"}}]
+    )
+    assert parts[0]["inlineData"]["mimeType"] == "audio/flac"
+
+
+def test_extract_multimodal_parts_audio_m4a_maps_to_mp4():
+    import base64
+
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    b64 = base64.b64encode(b"m4a").decode("ascii")
+    parts = _extract_multimodal_parts(
+        [{"type": "input_audio", "input_audio": {"data": b64, "format": "m4a"}}]
+    )
+    assert parts[0]["inlineData"]["mimeType"] == "audio/mp4"
+
+
+def test_extract_multimodal_parts_blank_audio_data_is_skipped():
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    parts = _extract_multimodal_parts(
+        [
+            {"type": "text", "text": "keep"},
+            {"type": "input_audio", "input_audio": {"data": "", "format": "ogg"}},
+            {"type": "audio", "audio": {}},  # no data/url at all
+        ]
+    )
+    assert parts == [{"text": "keep"}]
+
+
 def test_extract_multimodal_parts_invalid_audio_base64_is_skipped():
     from agent.gemini_native_adapter import _extract_multimodal_parts
 

@@ -175,7 +175,15 @@ class TestGuessAudioFormat:
         assert _guess_audio_format(Path("a.m4a")) == "m4a"
 
     def test_unknown_extension_defaults_to_ogg(self):
-        assert _guess_audio_format(Path("a.weirdext")) == "ogg"
+        assert _guess_audio_format(Path("a.totallyunknown")) == "ogg"
+
+    def test_mimetypes_fallback_for_known_audio_extension(self):
+        # .au isn't in _EXT_TO_FORMAT but mimetypes knows it (audio/basic),
+        # so the mimetypes branch resolves it rather than defaulting to ogg.
+        assert _guess_audio_format(Path("clip.au")) == "basic"
+
+    def test_mp3_mime_subtype_normalized(self):
+        assert _guess_audio_format(Path("clip.mpga")) == "mp3"
 
 
 # ─── build_native_audio_content_parts ────────────────────────────────────────
@@ -219,3 +227,18 @@ class TestBuildNativeAudioContentParts:
         parts, skipped = build_native_audio_content_parts("hi", [str(clip)])
         assert skipped == [str(clip)]
         assert all(p["type"] != "input_audio" for p in parts)
+
+    def test_unreadable_file_is_skipped(self, tmp_path: Path):
+        # A path that exists as a directory triggers the read OSError branch.
+        d = tmp_path / "adir.ogg"
+        d.mkdir()
+        parts, skipped = build_native_audio_content_parts("hi", [str(d)])
+        assert skipped == [str(d)]
+        assert all(p["type"] != "input_audio" for p in parts)
+
+    def test_format_inferred_from_extension(self, tmp_path: Path):
+        clip = tmp_path / "note.m4a"
+        clip.write_bytes(b"m4adata")
+        parts, _ = build_native_audio_content_parts("hi", [str(clip)])
+        audio = next(p for p in parts if p["type"] == "input_audio")
+        assert audio["input_audio"]["format"] == "m4a"
