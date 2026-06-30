@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 from unittest.mock import MagicMock, patch
 
@@ -115,6 +116,40 @@ def _fake_gemini_response(pcm: bytes = b"\x00\x01" * 4800):
     return resp
 
 
+def _fake_ffmpeg_transcode(cmd, *args, **kwargs):
+    """Stand in for the ffmpeg subprocess on runners without ffmpeg.
+
+    GHA bare runners have no system ffmpeg, so the real PCM->opus transcode
+    can't run. The render path only needs the call to succeed and leave a
+    non-empty opus-in-ogg file at the destination (the last token of the
+    ffmpeg command). Write a minimal OggS/OpusHead container so the
+    container-shape assertions hold without a real codec.
+    """
+    out_path = cmd[-1]
+    with open(out_path, "wb") as fh:
+        fh.write(b"OggS\x00\x02" + b"\x00" * 22 + b"OpusHead\x01\x01")
+    result = MagicMock()
+    result.returncode = 0
+    result.stderr = b""
+    return result
+
+
+@contextlib.contextmanager
+def _stub_ffmpeg():
+    """Pretend ffmpeg is installed and stub the transcode subprocess.
+
+    These tests validate the Gemini API payload and voice/locale overrides,
+    not the audio codec, so they must pass even when ffmpeg is absent (e.g.
+    on GHA bare runners). ``shutil.which`` is the module object shared by
+    ``tools.voice_reply`` and ``tools.tts_tool``, so one patch covers both
+    the pre-flight guard and the transcode lookup.
+    """
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"), patch(
+        "tools.tts_tool.subprocess.run", side_effect=_fake_ffmpeg_transcode
+    ):
+        yield
+
+
 class TestRenderVoiceNote:
     def test_renders_opus_ogg_with_spec_payload(self, tmp_path):
         captured = {}
@@ -125,7 +160,7 @@ class TestRenderVoiceNote:
             return _fake_gemini_response()
 
         out = str(tmp_path / "reply.mp3")  # wrong ext on purpose; forced to .ogg
-        with patch("requests.post", fake_post):
+        with _stub_ffmpeg(), patch("requests.post", fake_post):
             part = render_voice_note("Hola, ¿cómo estás? Todo está muy bien.", out)
 
         assert isinstance(part, RenderedVoiceNote)
@@ -160,7 +195,7 @@ class TestRenderVoiceNote:
             return _fake_gemini_response()
 
         out = str(tmp_path / "reply.ogg")
-        with patch("requests.post", fake_post):
+        with _stub_ffmpeg(), patch("requests.post", fake_post):
             part = render_voice_note(
                 "Buenos días", out, voice="Kore", locale="en-US"
             )
