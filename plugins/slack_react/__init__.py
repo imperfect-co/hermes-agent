@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger("hermes.plugins.slack_react")
@@ -69,6 +70,11 @@ _SUPPORTED_PLATFORMS = ("slack", "whatsapp")
 # Hard cap on distinct reactions fired per response — each is a sequential
 # platform call, so bound it even if the model emits many directives.
 _MAX_REACTIONS_PER_RESPONSE = 5
+
+# Total wall-clock budget (seconds) for ALL reaction calls in one response.
+# Reactions run synchronously in the turn-finalizer thread, so cap the
+# cumulative blocking time — not 15s × N — even if individual calls hang.
+_REACTION_TOTAL_BUDGET_S = 15.0
 
 # WhatsApp's Baileys `react` payload takes a literal unicode emoji, not a Slack
 # shortcode. Map the shortcodes advertised in the policy (plus a few common
@@ -169,20 +175,25 @@ def _resolve_target(platform: str):
     participant = None
     if platform == "whatsapp" and chat_id.endswith("@g.us"):
         # In a group the react key needs the sender JID of the target message;
-        # for a 1:1 chat it is omitted (remoteJid is enough).
+        # for a 1:1 chat it is omitted (remoteJid is enough). Without it the
+        # Baileys key is incomplete, so skip rather than misfire the reaction.
         participant = get_session_env("HERMES_SESSION_USER_ID", "") or None
+        if not participant:
+            logger.debug("slack_react: group reaction needs sender JID; skipping")
+            return None
 
     return runner, adapter, chat_id, message_id, participant
 
 
-def _dispatch(runner: Any, make_coro: Callable[[], Any]) -> bool:
+def _dispatch(runner: Any, make_coro: Callable[[], Any], timeout: float = 15.0) -> bool:
     """Run an adapter coroutine to completion (best-effort), returns success.
 
     The hook fires in a gateway worker thread; the WhatsApp adapter's aiohttp
     session is bound to the gateway loop, so schedule the coroutine there with
     ``safe_schedule_threadsafe``. Fall back to a private loop (CLI/tests) when
     no live gateway loop is available. ``make_coro`` is a factory so each path
-    awaits a fresh coroutine (never one already closed/consumed).
+    awaits a fresh coroutine (never one already closed/consumed). ``timeout``
+    bounds how long the caller blocks on this single reaction.
     """
     loop = getattr(runner, "_gateway_loop", None)
     if loop is not None and not loop.is_closed():
@@ -200,7 +211,7 @@ def _dispatch(runner: Any, make_coro: Callable[[], Any]) -> bool:
         if future is None:
             return False
         try:
-            future.result(timeout=15)
+            future.result(timeout=max(0.0, timeout))
             return True
         except Exception as exc:
             # Cancel so a slow call can't land a late reaction after we give up.
@@ -228,6 +239,7 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
 
     count = 0
     seen = set()
+    deadline = time.monotonic() + _REACTION_TOTAL_BUDGET_S
     for raw in shortcodes:
         # Cap on reactions actually fired (not directives seen), so skipped
         # ones — duplicates, or shortcodes with no WhatsApp unicode mapping —
@@ -237,6 +249,10 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
                 "slack_react: reaction limit (%d) reached; skipping the rest",
                 _MAX_REACTIONS_PER_RESPONSE,
             )
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.debug("slack_react: reaction time budget exhausted; skipping the rest")
             break
         name = raw.strip().strip(":").strip()
         key = name.lower()
@@ -249,7 +265,9 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
             if not callable(add_reaction):
                 logger.debug("slack_react: slack adapter has no _add_reaction")
                 break
-            if _dispatch(runner, lambda n=name: add_reaction(chat_id, message_id, n)):
+            if _dispatch(
+                runner, lambda n=name: add_reaction(chat_id, message_id, n), timeout=remaining
+            ):
                 count += 1
         else:  # whatsapp
             emoji = _SHORTCODE_TO_UNICODE.get(key)
@@ -265,6 +283,7 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
                 lambda e=emoji: send_reaction(
                     chat_id, message_id, e, from_me=False, participant=participant
                 ),
+                timeout=remaining,
             ):
                 count += 1
 

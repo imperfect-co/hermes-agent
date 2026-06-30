@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+import time
 import types
 from types import SimpleNamespace
 
@@ -262,6 +263,19 @@ def test_resolve_target_group_participant(monkeypatch):
     assert participant == "555@s.whatsapp.net"
 
 
+def test_resolve_target_group_missing_participant_returns_none(monkeypatch):
+    from gateway.config import Platform
+
+    wa = FakeWhatsAppAdapter()
+    env = {
+        "HERMES_SESSION_CHAT_ID": "grp@g.us",
+        "HERMES_SESSION_MESSAGE_ID": "M7",
+        "HERMES_SESSION_USER_ID": "",  # sender JID unresolved → cannot build group key
+    }
+    _install_fake_gateway(monkeypatch, env, {Platform.WHATSAPP: wa})
+    assert sr._resolve_target("whatsapp") is None
+
+
 def test_resolve_target_none_when_adapter_absent(monkeypatch):
     from gateway.config import Platform
 
@@ -288,6 +302,26 @@ def test_dispatch_runs_on_gateway_loop():
         runner = SimpleNamespace(_gateway_loop=loop)
         assert sr._dispatch(runner, lambda: coro()) is True
         assert seen["loop"] is loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        th.join(timeout=2)
+        loop.close()
+
+
+def test_dispatch_times_out_and_returns_false():
+    loop = asyncio.new_event_loop()
+    th = threading.Thread(target=loop.run_forever, daemon=True)
+    th.start()
+    try:
+        async def slow():
+            await asyncio.sleep(5)
+
+        runner = SimpleNamespace(_gateway_loop=loop)
+        start = time.monotonic()
+        ok = sr._dispatch(runner, lambda: slow(), timeout=0.3)
+        elapsed = time.monotonic() - start
+        assert ok is False
+        assert elapsed < 2.0  # returned at the timeout, not after the full 5s
     finally:
         loop.call_soon_threadsafe(loop.stop)
         th.join(timeout=2)
