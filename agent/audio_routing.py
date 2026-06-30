@@ -114,9 +114,11 @@ def _lookup_supports_audio(
 
         info = get_model_info(provider, model)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug(
-            "audio_routing: caps lookup failed for %s:%s — %s", provider, model, exc
-        )
+        # Log only the exception, not provider/model: those identifiers can
+        # originate from the same config that holds API keys, and CodeQL flags
+        # interpolating them as clear-text logging of sensitive data. The
+        # exception text is enough to debug a caps-lookup failure.
+        logger.debug("audio_routing: caps lookup failed — %s", exc)
         return None
     if info is None:
         return None
