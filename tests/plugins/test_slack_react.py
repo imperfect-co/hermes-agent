@@ -300,7 +300,8 @@ def test_dispatch_runs_on_gateway_loop():
             return "ok"
 
         runner = SimpleNamespace(_gateway_loop=loop)
-        assert sr._dispatch(runner, lambda: coro()) is True
+        # _dispatch returns the coroutine's own result.
+        assert sr._dispatch(runner, lambda: coro()) == "ok"
         assert seen["loop"] is loop
     finally:
         loop.call_soon_threadsafe(loop.stop)
@@ -333,7 +334,71 @@ def test_dispatch_fallback_without_gateway_loop():
 
     async def coro():
         ran["n"] += 1
+        return True
 
     runner = SimpleNamespace(_gateway_loop=None)
     assert sr._dispatch(runner, lambda: coro()) is True
     assert ran["n"] == 1
+
+
+def test_dispatch_skips_non_running_loop():
+    # A loop that exists but is not running must NOT be scheduled onto (it would
+    # hang to timeout); fall back to the private-loop path instead.
+    loop = asyncio.new_event_loop()  # created, never started → not running
+    try:
+        ran = {"n": 0}
+
+        async def coro():
+            ran["n"] += 1
+            return True
+
+        runner = SimpleNamespace(_gateway_loop=loop)
+        assert sr._dispatch(runner, lambda: coro()) is True
+        assert ran["n"] == 1
+    finally:
+        loop.close()
+
+
+# ---------------------------------------------------------------------------
+# _reaction_ok / success-signal accounting
+# ---------------------------------------------------------------------------
+
+class FakeSlackAdapterFail:
+    def __init__(self):
+        self.calls = []
+
+    async def _add_reaction(self, channel, timestamp, emoji):
+        self.calls.append((channel, timestamp, emoji))
+        return False  # e.g. missing scope / already reacted
+
+
+class FakeWhatsAppAdapterFail:
+    def __init__(self):
+        self.calls = []
+
+    async def send_reaction(self, chat_id, message_id, emoji, *, from_me=False, participant=None):
+        self.calls.append(emoji)
+        return SimpleNamespace(success=False)
+
+
+def test_reaction_ok_interprets_results():
+    assert sr._reaction_ok(True) is True
+    assert sr._reaction_ok(False) is False
+    assert sr._reaction_ok(None) is True  # no explicit signal → ran ok
+    assert sr._reaction_ok(SimpleNamespace(success=True)) is True
+    assert sr._reaction_ok(SimpleNamespace(success=False)) is False
+
+
+def test_slack_reaction_failure_not_counted(monkeypatch):
+    adapter = FakeSlackAdapterFail()
+    _patch_target(monkeypatch, adapter)
+    # Attempted, but the adapter reported failure → not counted.
+    assert sr._add_reactions("slack", ["+1"]) == 0
+    assert adapter.calls == [("C1", "111.222", "+1")]
+
+
+def test_whatsapp_reaction_failure_not_counted(monkeypatch):
+    adapter = FakeWhatsAppAdapterFail()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    assert sr._add_reactions("whatsapp", ["+1"]) == 0
+    assert adapter.calls == ["\U0001F44D"]

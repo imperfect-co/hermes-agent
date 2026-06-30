@@ -185,18 +185,22 @@ def _resolve_target(platform: str):
     return runner, adapter, chat_id, message_id, participant
 
 
-def _dispatch(runner: Any, make_coro: Callable[[], Any], timeout: float = 15.0) -> bool:
-    """Run an adapter coroutine to completion (best-effort), returns success.
+def _dispatch(runner: Any, make_coro: Callable[[], Any], timeout: float = 15.0) -> Any:
+    """Run an adapter coroutine and return its result (or False on failure).
 
     The hook fires in a gateway worker thread; the WhatsApp adapter's aiohttp
     session is bound to the gateway loop, so schedule the coroutine there with
-    ``safe_schedule_threadsafe``. Fall back to a private loop (CLI/tests) when
-    no live gateway loop is available. ``make_coro`` is a factory so each path
-    awaits a fresh coroutine (never one already closed/consumed). ``timeout``
-    bounds how long the caller blocks on this single reaction.
+    ``safe_schedule_threadsafe`` when that loop is actually running. Otherwise
+    fall back to a private loop (CLI/tests). ``make_coro`` is a factory so each
+    path awaits a fresh coroutine (never one already closed/consumed).
+    ``timeout`` bounds how long the caller blocks on this single reaction.
+
+    Returns the coroutine's own return value on success, or ``False`` when the
+    call could not be scheduled, timed out, or raised. Callers interpret the
+    adapter's success signal via ``_reaction_ok``.
     """
     loop = getattr(runner, "_gateway_loop", None)
-    if loop is not None and not loop.is_closed():
+    if loop is not None and not loop.is_closed() and loop.is_running():
         try:
             from agent.async_utils import safe_schedule_threadsafe
         except Exception as exc:  # pragma: no cover - import guard
@@ -211,23 +215,36 @@ def _dispatch(runner: Any, make_coro: Callable[[], Any], timeout: float = 15.0) 
         if future is None:
             return False
         try:
-            future.result(timeout=max(0.0, timeout))
-            return True
+            return future.result(timeout=max(0.0, timeout))
         except Exception as exc:
             # Cancel so a slow call can't land a late reaction after we give up.
             future.cancel()
             logger.debug("slack_react: reaction call failed: %s", exc)
             return False
 
-    # Fallback: no live gateway loop (CLI / tests).
+    # Fallback: no live (running) gateway loop (CLI / tests).
     try:
         from model_tools import _run_async
 
-        _run_async(make_coro())
-        return True
+        return _run_async(make_coro())
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("slack_react: fallback dispatch failed: %s", exc)
         return False
+
+
+def _reaction_ok(result: Any) -> bool:
+    """Interpret an adapter reaction result as success.
+
+    Slack ``_add_reaction`` returns a bool; WhatsApp ``send_reaction`` returns a
+    ``SendResult`` with ``.success``; a missing return value is treated as
+    success (the call ran without error).
+    """
+    if result is None:
+        return True
+    success = getattr(result, "success", None)
+    if success is not None:
+        return bool(success)
+    return bool(result)
 
 
 def _add_reactions(platform: str, shortcodes: List[str]) -> int:
@@ -265,8 +282,10 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
             if not callable(add_reaction):
                 logger.debug("slack_react: slack adapter has no _add_reaction")
                 break
-            if _dispatch(
-                runner, lambda n=name: add_reaction(chat_id, message_id, n), timeout=remaining
+            if _reaction_ok(
+                _dispatch(
+                    runner, lambda n=name: add_reaction(chat_id, message_id, n), timeout=remaining
+                )
             ):
                 count += 1
         else:  # whatsapp
@@ -278,12 +297,14 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
             if not callable(send_reaction):
                 logger.debug("slack_react: whatsapp adapter has no send_reaction")
                 break
-            if _dispatch(
-                runner,
-                lambda e=emoji: send_reaction(
-                    chat_id, message_id, e, from_me=False, participant=participant
-                ),
-                timeout=remaining,
+            if _reaction_ok(
+                _dispatch(
+                    runner,
+                    lambda e=emoji: send_reaction(
+                        chat_id, message_id, e, from_me=False, participant=participant
+                    ),
+                    timeout=remaining,
+                )
             ):
                 count += 1
 
