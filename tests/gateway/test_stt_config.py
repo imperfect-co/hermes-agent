@@ -81,6 +81,61 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
 
 
 @pytest.mark.asyncio
+async def test_enrich_message_strips_voice_note_placeholder_before_transcript():
+    """A captionless voice note's transport placeholder must not survive STT.
+
+    The Baileys bridge fills the body with ``[audio received]`` for a
+    captionless clip. Left in, it is appended after the transcript and the LLM
+    echoes it back to the user. STT enrichment must drop it so only the
+    transcript reaches the model.
+    """
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    runner._has_setup_skill = lambda: False
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={
+            "success": True,
+            "transcript": "meet me at noon",
+            "provider": "local_command",
+        },
+    ):
+        result, transcripts = await runner._enrich_message_with_transcription(
+            "[audio received]",
+            ["/tmp/voice.ogg"],
+        )
+
+    assert "meet me at noon" in result
+    assert "[audio received]" not in result
+    assert transcripts == ["meet me at noon"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_message_strips_placeholder_in_stt_disabled_note():
+    """The STT-disabled note must not carry the transport placeholder either."""
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=False)
+
+    with patch(
+        "gateway.run._probe_audio_duration",
+        new=AsyncMock(return_value="0:08"),
+    ):
+        result, transcripts = await runner._enrich_message_with_transcription(
+            "[audio received]",
+            ["/tmp/voice.ogg"],
+        )
+
+    assert "[audio received]" not in result
+    assert "/tmp/voice.ogg" in result
+    assert transcripts == []
+
+
+@pytest.mark.asyncio
 async def test_enrich_message_with_transcription_avoids_bogus_no_provider_message_for_backend_key_errors():
     from gateway.run import GatewayRunner
 
