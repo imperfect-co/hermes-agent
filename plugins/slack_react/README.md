@@ -58,10 +58,21 @@ keeps CLI/test contexts working.
 - React only:        `[[react:+1]] NO_REPLY`  → 👍 added, no text sent
 - React + reply:     `[[react:eyes]] Looking into it now.`
 - Multiple:          `[[react:+1]][[react:tada]] thanks all`
+- Skin tone:         `[[react:middle_finger::skin-tone-5]]`  → 🖕🏾
 
 On WhatsApp, only shortcodes present in `_SHORTCODE_TO_UNICODE` are delivered
 (the set advertised in the injected policy is covered); unmapped shortcodes are
 skipped. On Slack any valid workspace shortcode works.
+
+### Skin tones
+
+Hand/person emoji (`+1`, `-1`, `raised_hands`, `pray`, `ok_hand`, `clap`,
+`thumbsup`, `thumbsdown`, `middle_finger`) accept a Fitzpatrick skin tone via
+Slack's native `base::skin-tone-N` suffix, where `N` is `2` (light) … `6`
+(dark) — **brown is `skin-tone-5`** (🏾). Slack takes the composite name
+verbatim; on WhatsApp the base emoji is suffixed with the matching modifier
+codepoint (`_SKIN_TONE_UNICODE`). A skin tone requested on an emoji that can't
+carry one (e.g. `tada`) is dropped and the base reacts plain.
 
 ## Enable
 

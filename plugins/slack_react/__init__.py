@@ -31,6 +31,12 @@ Slack's ``_add_reaction`` (``reactions.add``) or WhatsApp's ``send_reaction``
 (Baileys ``react``). WhatsApp's API needs a literal unicode emoji, so Slack
 shortcodes are mapped via ``_SHORTCODE_TO_UNICODE``.
 
+Hand/person emoji may carry a skin tone via Slack's native
+``base::skin-tone-N`` suffix (e.g. ``middle_finger::skin-tone-5`` → brown
+\U0001F595\U0001F3FE). Slack takes that name verbatim; on WhatsApp the base
+emoji is suffixed with the Fitzpatrick modifier (``_SKIN_TONE_UNICODE``). A tone
+on an emoji that can't carry one (``_SKINTONE_CAPABLE``) is dropped.
+
 Because the hook runs in a gateway worker thread while the WhatsApp adapter's
 HTTP session is bound to the gateway event loop, reaction coroutines are
 scheduled back onto that loop via ``safe_schedule_threadsafe``; a private-loop
@@ -54,9 +60,12 @@ from typing import Any, Callable, List, Optional
 logger = logging.getLogger("hermes.plugins.slack_react")
 
 # Matches [[react:EMOJI]] — EMOJI is a shortcode, with or without the
-# surrounding colons (e.g. "+1", ":+1:", "white_check_mark", "tada").
+# surrounding colons (e.g. "+1", ":+1:", "white_check_mark", "tada"). A hand or
+# person emoji may carry Slack's native skin-tone suffix (e.g.
+# "middle_finger::skin-tone-5" → brown 🖕🏾); the "::skin-tone-N" part is
+# captured with the base so it survives stripping and can be split off later.
 _DIRECTIVE_RE = re.compile(
-    r"\[\[\s*react\s*:\s*:?([a-zA-Z0-9_+\-]+):?\s*\]\]",
+    r"\[\[\s*react\s*:\s*:?([a-zA-Z0-9_+\-]+(?:::skin-tone-[2-6])?):?\s*\]\]",
     re.IGNORECASE,
 )
 
@@ -98,9 +107,51 @@ _SHORTCODE_TO_UNICODE = {
     "rocket": "\U0001F680",        # 🚀
     "ok_hand": "\U0001F44C",       # 👌
     "clap": "\U0001F44F",          # 👏
+    "middle_finger": "\U0001F595",  # 🖕
     "thinking_face": "\U0001F914",  # 🤔
     "joy": "\U0001F602",           # 😂
 }
+
+# Skin-tone (Fitzpatrick) modifiers. Slack names a toned reaction
+# ``base::skin-tone-N``; WhatsApp needs the base emoji followed by the literal
+# modifier codepoint. Keyed by the ``skin-tone-N`` suffix the model emits.
+# "brown" is medium-dark (type-5, 🏾) — the tone this plugin was asked for.
+_SKIN_TONE_UNICODE = {
+    "skin-tone-2": "\U0001F3FB",  # 🏻 light
+    "skin-tone-3": "\U0001F3FC",  # 🏼 medium-light
+    "skin-tone-4": "\U0001F3FD",  # 🏽 medium
+    "skin-tone-5": "\U0001F3FE",  # 🏾 medium-dark / "brown"
+    "skin-tone-6": "\U0001F3FF",  # 🏿 dark
+}
+
+# Only hand/person emoji accept a skin tone. Applying a modifier to a face or
+# object (e.g. 🎉, 😂) yields a broken two-glyph sequence on WhatsApp and an
+# invalid name on Slack, so a tone requested on anything else is dropped and the
+# base emoji reacts plain.
+_SKINTONE_CAPABLE = frozenset({
+    "+1",
+    "thumbsup",
+    "-1",
+    "thumbsdown",
+    "raised_hands",
+    "pray",
+    "ok_hand",
+    "clap",
+    "middle_finger",
+})
+
+
+def _split_skin_tone(shortcode: str) -> tuple[str, Optional[str]]:
+    """Split ``base::skin-tone-N`` into ``(base, "skin-tone-N")``.
+
+    Returns ``(shortcode, None)`` when there is no valid skin-tone suffix, or
+    when the base emoji does not accept one (the tone is then discarded so the
+    base reacts plain).
+    """
+    base, sep, tone = shortcode.partition("::")
+    if sep and tone in _SKIN_TONE_UNICODE and base in _SKINTONE_CAPABLE:
+        return base, tone
+    return base if sep else shortcode, None
 
 
 def _resolve_platform(raw: Any) -> Optional[str]:
@@ -125,8 +176,13 @@ def _policy(platform: str) -> str:
         "similar — prefer reacting with an emoji over writing a text reply.\n"
         "- To react, put a control directive `[[react:EMOJI]]` anywhere in your "
         "response, where EMOJI is an emoji shortcode WITHOUT colons "
-        "(e.g. +1, tada, eyes, white_check_mark, raised_hands, pray). You may "
-        "include more than one directive to add multiple reactions.\n"
+        "(e.g. +1, tada, eyes, white_check_mark, raised_hands, pray, "
+        "middle_finger). You may include more than one directive to add "
+        "multiple reactions.\n"
+        "- Hand/person emoji (e.g. +1, raised_hands, pray, clap, ok_hand, "
+        "middle_finger) accept a skin tone: append `::skin-tone-N` where N is "
+        "2 (light) … 6 (dark) and brown is 5, e.g. "
+        "`[[react:middle_finger::skin-tone-5]]`.\n"
         "- If a reaction is all that's warranted, make the ENTIRE rest of your "
         f"response exactly `{_SILENT_TOKEN}` so NO text message is sent — only "
         f"the reaction lands. Example: `[[react:+1]] {_SILENT_TOKEN}`.\n"
@@ -278,24 +334,34 @@ def _add_reactions(platform: str, shortcodes: List[str]) -> int:
         if not name or key in seen:
             continue
         seen.add(key)
+        # Slack emoji names are lowercase — normalize so "TADA" == "tada". Split
+        # off an optional skin tone: `middle_finger::skin-tone-5` → base +
+        # `skin-tone-5` (dropped for emoji that can't carry one).
+        base, tone = _split_skin_tone(key)
 
         if platform == "slack":
             add_reaction = getattr(adapter, "_add_reaction", None)
             if not callable(add_reaction):
                 logger.debug("slack_react: slack adapter has no _add_reaction")
                 break
-            # Slack emoji names are lowercase — normalize so "TADA" == "tada".
+            # Slack's native toned-reaction name is `base::skin-tone-N`.
+            slack_name = f"{base}::{tone}" if tone else base
             if _reaction_ok(
                 _dispatch(
-                    runner, lambda n=key: add_reaction(chat_id, message_id, n), timeout=remaining
+                    runner,
+                    lambda n=slack_name: add_reaction(chat_id, message_id, n),
+                    timeout=remaining,
                 )
             ):
                 count += 1
         else:  # whatsapp
-            emoji = _SHORTCODE_TO_UNICODE.get(key)
+            emoji = _SHORTCODE_TO_UNICODE.get(base)
             if not emoji:
                 logger.debug("slack_react: no unicode mapping for %r (whatsapp)", name)
                 continue
+            # WhatsApp takes a literal emoji: base + Fitzpatrick modifier.
+            if tone:
+                emoji += _SKIN_TONE_UNICODE[tone]
             send_reaction = getattr(adapter, "send_reaction", None)
             if not callable(send_reaction):
                 logger.debug("slack_react: whatsapp adapter has no send_reaction")
