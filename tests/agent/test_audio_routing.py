@@ -16,6 +16,7 @@ from agent.audio_routing import (
     exceeds_native_audio_limits,
     native_audio_max_bytes,
     native_audio_max_seconds,
+    strip_audio_placeholder_caption,
 )
 
 
@@ -299,6 +300,36 @@ class TestBuildNativeAudioContentParts:
         parts, _ = build_native_audio_content_parts("", [str(clip)])
         assert parts[0]["type"] == "text"
         assert parts[0]["text"].startswith("Listen to this voice message")
+        # No raw cache path leaks into the model-visible text when there is no
+        # caption — the path hint is parrot-bait the model echoes back verbatim.
+        assert "[Voice message attached:" not in parts[0]["text"]
+        assert str(clip) not in parts[0]["text"]
+
+    def test_placeholder_caption_is_treated_as_captionless(self, tmp_path: Path):
+        """A captionless WhatsApp voice note (the reported bug).
+
+        The Baileys bridge fills body with ``[audio received]`` for a
+        captionless clip. That transport placeholder must NOT reach the model
+        as the user's text, and the raw cache path must NOT be injected — both
+        get parroted straight back as the reply ("[audio received] [Voice
+        message attached: ]0:09:00"). The turn must be a clean instruction plus
+        the audio bytes only.
+        """
+        clip = tmp_path / "aud_deadbeef.ogg"
+        clip.write_bytes(b"oggbytes")
+        parts, skipped = build_native_audio_content_parts(
+            "[audio received]", [str(clip)]
+        )
+        assert skipped == []
+        text_part = parts[0]
+        assert text_part["type"] == "text"
+        # No leaked metadata of any kind.
+        assert "[audio received]" not in text_part["text"]
+        assert "[Voice message attached:" not in text_part["text"]
+        assert str(clip) not in text_part["text"]
+        assert text_part["text"] == "Listen to this voice message and respond."
+        # The audio bytes are still attached natively.
+        assert parts[1]["type"] == "input_audio"
 
     def test_missing_path_is_skipped(self, tmp_path: Path):
         good = tmp_path / "ok.ogg"
@@ -333,3 +364,32 @@ class TestBuildNativeAudioContentParts:
         parts, _ = build_native_audio_content_parts("hi", [str(clip)])
         audio = next(p for p in parts if p["type"] == "input_audio")
         assert audio["input_audio"]["format"] == "m4a"
+
+
+# ─── strip_audio_placeholder_caption ─────────────────────────────────────────
+
+
+class TestStripAudioPlaceholderCaption:
+    def test_strips_bridge_audio_placeholder(self):
+        assert strip_audio_placeholder_caption("[audio received]") == ""
+
+    def test_strips_ptt_placeholder(self):
+        # The bridge emits "[ptt received]" for a push-to-talk voice note.
+        assert strip_audio_placeholder_caption("[ptt received]") == ""
+
+    def test_strips_with_surrounding_whitespace_and_case(self):
+        assert strip_audio_placeholder_caption("  [Audio Received]  ") == ""
+
+    def test_keeps_real_caption(self):
+        assert strip_audio_placeholder_caption("what did I just record?") == (
+            "what did I just record?"
+        )
+
+    def test_keeps_caption_that_merely_mentions_audio(self):
+        # Only a lone placeholder is stripped, not any text containing the word.
+        text = "the audio received was garbled"
+        assert strip_audio_placeholder_caption(text) == text
+
+    def test_none_and_empty_normalise_to_empty_string(self):
+        assert strip_audio_placeholder_caption(None) == ""
+        assert strip_audio_placeholder_caption("   ") == ""

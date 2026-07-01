@@ -14094,6 +14094,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 list if every clip failed or STT is disabled. Callers can use
                 this to echo transcripts back to the user before the agent loop.
         """
+        # A captionless voice note carries a transport placeholder ("[audio
+        # received]") rather than real text. Drop it so it isn't appended after
+        # the transcript (or surfaced verbatim in the STT-disabled note), where
+        # the model would echo the placeholder back to the user.
+        from agent.audio_routing import strip_audio_placeholder_caption
+
+        user_text = strip_audio_placeholder_caption(user_text)
         if not getattr(self.config, "stt_enabled", True):
             notes = []
             for path in audio_paths:

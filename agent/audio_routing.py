@@ -33,10 +33,39 @@ import base64
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# Bridge/adapter caption placeholders inserted for media that arrived without a
+# caption (e.g. the Baileys bridge sets ``body = "[audio received]"`` for a
+# captionless WhatsApp voice note). These are UI markers — never something the
+# user actually said — so they must not become the model-visible caption. When
+# they do, an audio model with a short/ambiguous clip parrots the injected text
+# straight back as its reply (observed: "[audio received] [Voice message
+# attached: ]0:09:00"). :func:`strip_audio_placeholder_caption` normalises such
+# a caption to the empty string so the caller falls back to a clean instruction.
+_AUDIO_PLACEHOLDER_RE = re.compile(
+    r"^\[(?:audio|ptt|voice|voice message|voice note) received\]$",
+    re.IGNORECASE,
+)
+
+
+def strip_audio_placeholder_caption(text: Optional[str]) -> str:
+    """Return ``text`` stripped, or ``""`` when it is only a media placeholder.
+
+    Voice notes carry no real caption; the transport fills in a placeholder so
+    the API turn is never empty. That placeholder is noise for the audio
+    pipeline (the model hears the bytes / STT transcribes them), and worse, it
+    is parrot-bait — so we drop it here before it reaches the model.
+    """
+    stripped = (text or "").strip()
+    if _AUDIO_PLACEHOLDER_RE.match(stripped):
+        return ""
+    return stripped
 
 
 _VALID_MODES = frozenset({"auto", "always", "never"})
@@ -283,13 +312,23 @@ def build_native_audio_content_parts(
 
     Shape (mirrors :func:`agent.image_routing.build_native_content_parts`):
 
-      [{"type": "text", "text": "...\\n\\n[Voice message attached: /path]"},
+      [{"type": "text", "text": "how do I do X?\\n\\n[Voice message attached: /path]"},
        {"type": "input_audio", "input_audio": {"data": "<b64>", "format": "ogg"}},
        ...]
 
-    Local paths are read from disk and embedded as base64. A text hint
-    (``[Voice message attached: <path>]``) is appended so path-taking tools
-    still have a handle on the clip — exactly as the image builder does.
+    Local paths are read from disk and embedded as base64.
+
+    The model-visible text depends on whether the user typed a real caption:
+
+      * With a caption, a ``[Voice message attached: <path>]`` hint is appended
+        so path-taking tools still have a handle on the clip (as the image
+        builder does); the caption anchors the model so it answers rather than
+        echoing the hint.
+      * Without one (the common WhatsApp voice-note case — a captionless clip
+        whose transport placeholder like ``[audio received]`` is stripped here),
+        we emit only a neutral instruction and **omit the raw cache path**. The
+        model hears the bytes and does not need the path; injecting it just
+        invites the model to parrot the metadata back as its reply.
 
     Returns ``(content_parts, skipped)``. Skipped entries are paths that
     couldn't be read. When nothing attaches, returns a plain text-only part
@@ -325,12 +364,19 @@ def build_native_audio_content_parts(
         )
         attached_paths.append(str(raw_path))
 
-    text = (user_text or "").strip()
+    text = strip_audio_placeholder_caption(user_text)
 
     if attached_paths:
-        base_text = text or "Listen to this voice message and respond."
-        hint_lines = [f"[Voice message attached: {p}]" for p in attached_paths]
-        combined_text = f"{base_text}\n\n" + "\n".join(hint_lines)
+        if text:
+            # Real caption: anchor the model with it and append the path hint so
+            # path-taking tools keep a handle on the clip.
+            hint_lines = [f"[Voice message attached: {p}]" for p in attached_paths]
+            combined_text = f"{text}\n\n" + "\n".join(hint_lines)
+        else:
+            # Captionless voice note: a clean instruction only. No transport
+            # placeholder and no raw cache path — either is parrot-bait the
+            # model echoes back verbatim on a short/ambiguous clip.
+            combined_text = "Listen to this voice message and respond."
         parts: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}]
         parts.extend(audio_parts)
         return parts, skipped
@@ -344,6 +390,7 @@ def build_native_audio_content_parts(
 __all__ = [
     "decide_audio_input_mode",
     "build_native_audio_content_parts",
+    "strip_audio_placeholder_caption",
     "exceeds_native_audio_limits",
     "probe_audio_duration_seconds",
     "native_audio_max_bytes",
