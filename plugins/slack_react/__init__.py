@@ -100,6 +100,11 @@ _SHORTCODE_TO_UNICODE = {
     "clap": "\U0001F44F",          # 👏
     "thinking_face": "\U0001F914",  # 🤔
     "joy": "\U0001F602",           # 😂
+    "middle_finger": "\U0001f595", # 🖕
+    "middle_finger_brown": "\U0001f595\U0001f3fd", # 🖕🏽 (Medium / Brown)
+    "thumbsup_brown": "\U0001f44d\U0001f3fd",      # 👍🏽 (Medium / Brown)
+    "clap_brown": "\U0001f44f\U0001f3fd",          # 👏🏽 (Medium / Brown)
+    "pray_brown": "\U0001f64f\U0001f3fd",          # 🙏🏽 (Medium / Brown)
 }
 
 
