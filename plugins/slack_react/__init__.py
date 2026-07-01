@@ -16,12 +16,16 @@ Two stock hooks:
    is enough. The model decides; the plugin only supplies the vocabulary.
 
 2. ``transform_llm_output`` — after the model replies, scan for
-   ``[[react:EMOJI]]`` directives, fire the platform's native reaction on the
-   message that triggered this turn, strip the directives, and return either:
-     * the cleaned text (react **and** reply), or
-     * the literal ``NO_REPLY`` (react **instead of** reply). ``NO_REPLY`` is the
-       gateway's built-in intentional-silence token
+   ``[[react:EMOJI]]`` directives. A reaction and a text reply are *mutually
+   exclusive* (see the injected policy), so exactly one of two things happens:
+     * **reaction only** — nothing remains but ``NO_REPLY`` (or blank) once the
+       directives are stripped: fire the platform's native reaction on the
+       message that triggered this turn and return the literal ``NO_REPLY``.
+       ``NO_REPLY`` is the gateway's built-in intentional-silence token
        (``gateway/response_filters.py``), so no text message is sent.
+     * **reply only** — a substantive reply is present: the reply wins, the
+       reaction is suppressed as redundant noise, the directive markup is
+       stripped, and the cleaned text is delivered. Never both.
 
 The triggering message is resolved from the per-turn session context vars
 ``HERMES_SESSION_CHAT_ID`` / ``HERMES_SESSION_MESSAGE_ID`` (set by the gateway
@@ -127,11 +131,13 @@ def _policy(platform: str) -> str:
         "response, where EMOJI is an emoji shortcode WITHOUT colons "
         "(e.g. +1, tada, eyes, white_check_mark, raised_hands, pray). You may "
         "include more than one directive to add multiple reactions.\n"
-        "- If a reaction is all that's warranted, make the ENTIRE rest of your "
+        "- A reaction and a text reply are MUTUALLY EXCLUSIVE — never send both. "
+        "If a reaction is all that's warranted, make the ENTIRE rest of your "
         f"response exactly `{_SILENT_TOKEN}` so NO text message is sent — only "
         f"the reaction lands. Example: `[[react:+1]] {_SILENT_TOKEN}`.\n"
-        "- When a substantive answer is needed, just reply normally; you may "
-        "still add a `[[react:...]]` directive on top if a reaction also fits.\n"
+        "- When a substantive answer is needed, just reply normally and do NOT "
+        "add a `[[react:...]]` directive: a reaction alongside a real reply is "
+        "redundant noise and will be dropped.\n"
         "- Use judgment: do not react to genuine questions or requests that need "
         "a real answer, and do not over-use reactions."
     )
@@ -332,8 +338,15 @@ def _pre_llm_call(**kwargs) -> Optional[dict]:
 def _transform_llm_output(**kwargs) -> Optional[str]:
     """Act on any [[react:...]] directives in the model's reply.
 
-    Returns the cleaned reply text (react + reply), the NO_REPLY silence token
-    (react only), or None to leave the response unchanged.
+    A reaction and a text reply are mutually exclusive — never both:
+
+    * **reaction only** — nothing remains but ``NO_REPLY`` (or blank) after the
+      directives are stripped: fire the reaction(s) and return the ``NO_REPLY``
+      silence token so no text message is sent.
+    * **reply only** — a substantive reply is present: the reply wins. Suppress
+      the reaction(s) as redundant noise, strip the directive markup, and return
+      the cleaned text.
+    * no directive → None (leave the response unchanged).
     """
     platform = _resolve_platform(kwargs.get("platform"))
     if not platform:
@@ -347,18 +360,26 @@ def _transform_llm_output(**kwargs) -> Optional[str]:
     if not shortcodes:
         return None
 
-    # Fire the reactions (best-effort). Even if delivery fails we still strip
-    # the directive so raw markup never reaches the user.
+    cleaned = _DIRECTIVE_RE.sub("", text).strip()
+    if cleaned and cleaned.upper() != _SILENT_TOKEN:
+        # A substantive reply is present. Firing a reaction on top would send
+        # both a reaction and a message — the reaction policy forbids that, so
+        # drop the reaction(s) and deliver the text only. The directive markup
+        # is already stripped from ``cleaned``, so raw ``[[react:...]]`` never
+        # reaches the user.
+        logger.debug(
+            "slack_react: suppressing %d reaction directive(s); a substantive "
+            "reply is present (react-and-reply is not allowed)",
+            len(shortcodes),
+        )
+        return cleaned
+
+    # Reaction is the whole response → fire it (best-effort) and stay silent.
     try:
         _add_reactions(platform, shortcodes)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("slack_react: _add_reactions raised: %s", exc)
-
-    cleaned = _DIRECTIVE_RE.sub("", text).strip()
-    if not cleaned or cleaned.upper() == _SILENT_TOKEN:
-        # Reaction is the whole response → stay silent.
-        return _SILENT_TOKEN
-    return cleaned
+    return _SILENT_TOKEN
 
 
 def register(ctx) -> None:

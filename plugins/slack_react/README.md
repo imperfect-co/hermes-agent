@@ -2,8 +2,9 @@
 
 Emoji reactions for **Slack** and **WhatsApp**, driven by a `[[react:EMOJI]]`
 control directive. Lets the agent react to the triggering message with an emoji
-(e.g. `:+1:` for "thanks" / "issue fixed") **instead of** or **in addition to**
-a text reply.
+(e.g. `:+1:` for "thanks" / "issue fixed") **instead of** a text reply. A
+reaction and a reply are **mutually exclusive** — the agent reacts *or* replies,
+never both (sending both is redundant noise).
 
 ## How it works
 
@@ -13,12 +14,15 @@ Two stock hooks, registered by `register(ctx)` in `__init__.py`:
    teaching the model the reaction vocabulary and when a reaction alone is
    enough. (The model decides; the plugin only gives it the option.)
 
-2. **`transform_llm_output`** — after the model replies, before it is sent:
-   - scans the reply for `[[react:EMOJI]]` control directives,
-   - fires the platform's native reaction on the **message that triggered this
-     turn**, and
-   - strips the directives, returning either the cleaned text (react **and**
-     reply) or the literal `NO_REPLY` (react **only**).
+2. **`transform_llm_output`** — after the model replies, before it is sent,
+   scans the reply for `[[react:EMOJI]]` control directives. A reaction and a
+   text reply are **mutually exclusive**, so exactly one of two things happens:
+   - **reaction only** — nothing remains but `NO_REPLY` (or blank) once the
+     directives are stripped: fire the platform's native reaction on the
+     **message that triggered this turn** and return the literal `NO_REPLY`.
+   - **reply only** — a substantive reply is present: the reply wins, the
+     reaction is **suppressed** as redundant noise, the directive markup is
+     stripped, and the cleaned text is delivered.
 
 `NO_REPLY` is the gateway's built-in intentional-silence token
 (`gateway/response_filters.py`), so a react-only turn sends no text message and
@@ -55,9 +59,11 @@ keeps CLI/test contexts working.
 [[react:EMOJI]]        # EMOJI = shortcode w/o colons: +1, tada, eyes, ...
 ```
 
-- React only:        `[[react:+1]] NO_REPLY`  → 👍 added, no text sent
-- React + reply:     `[[react:eyes]] Looking into it now.`
-- Multiple:          `[[react:+1]][[react:tada]] thanks all`
+- React only:           `[[react:+1]] NO_REPLY`  → 👍 added, no text sent
+- Multiple, react only: `[[react:+1]][[react:tada]] NO_REPLY`
+- Reply only:           `[[react:eyes]] Looking into it now.` → text sent, **no
+  reaction** — a reply and a reaction are mutually exclusive, so the directive
+  is stripped and the reaction is dropped
 
 On WhatsApp, only shortcodes present in `_SHORTCODE_TO_UNICODE` are delivered
 (the set advertised in the injected policy is covered); unmapped shortcodes are
