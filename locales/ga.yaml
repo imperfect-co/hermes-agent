@@ -59,12 +59,12 @@ gateway:
 
   approve:
     no_pending:            "Níl aon ordú ag fanacht le ceadú."
-    once_singular:         "✅ Ordú ceadaithe. Tá an gníomhaire ag atosú..."
-    once_plural:           "✅ Orduithe ceadaithe ({count} ordú). Tá an gníomhaire ag atosú..."
-    session_singular:      "✅ Ordú ceadaithe (patrún ceadaithe don seisiún seo). Tá an gníomhaire ag atosú..."
-    session_plural:        "✅ Orduithe ceadaithe (patrún ceadaithe don seisiún seo) ({count} ordú). Tá an gníomhaire ag atosú..."
-    always_singular:       "✅ Ordú ceadaithe (patrún ceadaithe go buan). Tá an gníomhaire ag atosú..."
-    always_plural:         "✅ Orduithe ceadaithe (patrún ceadaithe go buan) ({count} ordú). Tá an gníomhaire ag atosú..."
+    once_singular:         "Ordú ceadaithe. Tá an gníomhaire ag atosú..."
+    once_plural:           "Orduithe ceadaithe. Tá an gníomhaire ag atosú..."
+    session_singular:      "Ordú ceadaithe (patrún ceadaithe don seisiún seo). Tá an gníomhaire ag atosú..."
+    session_plural:        "Orduithe ceadaithe (patrún ceadaithe don seisiún seo). Tá an gníomhaire ag atosú..."
+    always_singular:       "Ordú ceadaithe (patrún ceadaithe go buan). Tá an gníomhaire ag atosú..."
+    always_plural:         "Orduithe ceadaithe (patrún ceadaithe go buan). Tá an gníomhaire ag atosú..."
 
   background:
     usage:                 "Úsáid: /background <leid>\nSampla: /background Déan achoimre ar phríomhscéalta HN inniu\n\nRitheann an leid i seisiún ar leith. Is féidir leat leanúint leis an gcomhrá — taispeánfar an toradh anseo nuair a bheidh sé críochnaithe."

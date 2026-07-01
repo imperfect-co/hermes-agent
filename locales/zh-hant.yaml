@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "沒有待批准的指令。"
-    once_singular:         "✅ 指令已批准。代理正在恢復…"
-    once_plural:           "✅ 指令已批准（{count} 條指令）。代理正在恢復…"
-    session_singular:      "✅ 指令已批准（本次工作階段內允許該模式）。代理正在恢復…"
-    session_plural:        "✅ 指令已批准（本次工作階段內允許該模式）（{count} 條指令）。代理正在恢復…"
-    always_singular:       "✅ 指令已批准（永久允許該模式）。代理正在恢復…"
-    always_plural:         "✅ 指令已批准（永久允許該模式）（{count} 條指令）。代理正在恢復…"
+    once_singular:         "指令已批准。代理正在恢復…"
+    once_plural:           "指令已批准。代理正在恢復…"
+    session_singular:      "指令已批准（本次工作階段內允許該模式）。代理正在恢復…"
+    session_plural:        "指令已批准（本次工作階段內允許該模式）。代理正在恢復…"
+    always_singular:       "指令已批准（永久允許該模式）。代理正在恢復…"
+    always_plural:         "指令已批准（永久允許該模式）。代理正在恢復…"
 
   background:
     usage:                 "用法：/background <提示>\n範例：/background 摘要今天 HN 上的熱門故事\n\n在獨立工作階段中執行該提示。你可以繼續聊天 — 完成後結果將顯示於此。"

@@ -213,7 +213,7 @@ class TestApproveCommand:
         _gateway_queues[session_key] = [entry]
 
         result = await runner._handle_approve_command(_make_event("/approve"))
-        assert "approved" in result.lower()
+        assert "got it" in result.lower()
         assert "resuming" in result.lower()
         assert entry.event.is_set()
 
@@ -231,7 +231,7 @@ class TestApproveCommand:
         _gateway_queues[session_key] = [e1, e2]
 
         result = await runner._handle_approve_command(_make_event("/approve all"))
-        assert "2 commands" in result
+        assert "resuming" in result.lower()
         assert e1.event.is_set()
         assert e2.event.is_set()
 
@@ -249,7 +249,7 @@ class TestApproveCommand:
         _gateway_queues[session_key] = [e1, e2]
 
         result = await runner._handle_approve_command(_make_event("/approve all session"))
-        assert "session" in result.lower()
+        assert "resuming" in result.lower()
         assert e1.result == "session"
         assert e2.result == "session"
 

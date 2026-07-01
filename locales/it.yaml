@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "Nessun comando in attesa di approvazione."
-    once_singular:         "✅ Comando approvato. L'agente sta riprendendo..."
-    once_plural:           "✅ Comandi approvati ({count} comandi). L'agente sta riprendendo..."
-    session_singular:      "✅ Comando approvato (modello approvato per questa sessione). L'agente sta riprendendo..."
-    session_plural:        "✅ Comandi approvati (modello approvato per questa sessione) ({count} comandi). L'agente sta riprendendo..."
-    always_singular:       "✅ Comando approvato (modello approvato in modo permanente). L'agente sta riprendendo..."
-    always_plural:         "✅ Comandi approvati (modello approvato in modo permanente) ({count} comandi). L'agente sta riprendendo..."
+    once_singular:         "Comando approvato. L'agente sta riprendendo..."
+    once_plural:           "Comandi approvati. L'agente sta riprendendo..."
+    session_singular:      "Comando approvato (modello approvato per questa sessione). L'agente sta riprendendo..."
+    session_plural:        "Comandi approvati (modello approvato per questa sessione). L'agente sta riprendendo..."
+    always_singular:       "Comando approvato (modello approvato in modo permanente). L'agente sta riprendendo..."
+    always_plural:         "Comandi approvati (modello approvato in modo permanente). L'agente sta riprendendo..."
 
   background:
     usage:                 "Uso: /background <prompt>\nEsempio: /background Riassumi le principali notizie di HN di oggi\n\nEsegue il prompt in una sessione separata. Puoi continuare a chattare — il risultato apparirà qui al termine."

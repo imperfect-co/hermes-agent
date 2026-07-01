@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "Onaylanacak bekleyen komut yok."
-    once_singular:         "✅ Komut onaylandı. Ajan devam ediyor..."
-    once_plural:           "✅ Komutlar onaylandı ({count} komut). Ajan devam ediyor..."
-    session_singular:      "✅ Komut onaylandı (desen bu oturum için onaylandı). Ajan devam ediyor..."
-    session_plural:        "✅ Komutlar onaylandı (desen bu oturum için onaylandı) ({count} komut). Ajan devam ediyor..."
-    always_singular:       "✅ Komut onaylandı (desen kalıcı olarak onaylandı). Ajan devam ediyor..."
-    always_plural:         "✅ Komutlar onaylandı (desen kalıcı olarak onaylandı) ({count} komut). Ajan devam ediyor..."
+    once_singular:         "Komut onaylandı. Ajan devam ediyor..."
+    once_plural:           "Komutlar onaylandı. Ajan devam ediyor..."
+    session_singular:      "Komut onaylandı (desen bu oturum için onaylandı). Ajan devam ediyor..."
+    session_plural:        "Komutlar onaylandı (desen bu oturum için onaylandı). Ajan devam ediyor..."
+    always_singular:       "Komut onaylandı (desen kalıcı olarak onaylandı). Ajan devam ediyor..."
+    always_plural:         "Komutlar onaylandı (desen kalıcı olarak onaylandı). Ajan devam ediyor..."
 
   background:
     usage:                 "Kullanım: /background <prompt>\nÖrnek: /background Bugünün öne çıkan HN haberlerini özetle\n\nİstemi ayrı bir oturumda çalıştırır. Sohbete devam edebilirsin — sonuç tamamlandığında burada görünecek."

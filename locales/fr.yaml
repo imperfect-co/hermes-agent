@@ -55,12 +55,12 @@ gateway:
 
   approve:
     no_pending:            "Aucune commande en attente d'approbation."
-    once_singular:         "✅ Commande approuvée. L'agent reprend..."
-    once_plural:           "✅ Commandes approuvées ({count} commandes). L'agent reprend..."
-    session_singular:      "✅ Commande approuvée (modèle approuvé pour cette session). L'agent reprend..."
-    session_plural:        "✅ Commandes approuvées (modèle approuvé pour cette session) ({count} commandes). L'agent reprend..."
-    always_singular:       "✅ Commande approuvée (modèle approuvé de manière permanente). L'agent reprend..."
-    always_plural:         "✅ Commandes approuvées (modèle approuvé de manière permanente) ({count} commandes). L'agent reprend..."
+    once_singular:         "Commande approuvée. L'agent reprend..."
+    once_plural:           "Commandes approuvées. L'agent reprend..."
+    session_singular:      "Commande approuvée (modèle approuvé pour cette session). L'agent reprend..."
+    session_plural:        "Commandes approuvées (modèle approuvé pour cette session). L'agent reprend..."
+    always_singular:       "Commande approuvée (modèle approuvé de manière permanente). L'agent reprend..."
+    always_plural:         "Commandes approuvées (modèle approuvé de manière permanente). L'agent reprend..."
 
   background:
     usage:                 "Usage : /background <prompt>\nExemple : /background Résume les meilleures histoires HN d'aujourd'hui\n\nExécute le prompt dans une session séparée. Vous pouvez continuer à discuter — le résultat apparaîtra ici une fois terminé."
