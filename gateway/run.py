@@ -409,13 +409,37 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
     return bool(_GATEWAY_PROVIDER_ERROR_SHAPE_RE.search(body))
 
 
+# A leading orphan ":" separator (ASCII ":" or full-width "：") followed by
+# spaces — the scaffolding residue when a turn is rebuilt as "<speaker>: <text>"
+# and the speaker is lost, so the user's own words get echoed back as
+# ": look for a cheaper alternative…". Requiring a trailing space keeps emoji
+# shortcodes (":smile:") and bare "::" untouched.
+_LEADING_ORPHAN_COLON_RE = re.compile(r"^\s*[:：][ \t]+")
+
+
+def _strip_leading_orphan_colon(text: str) -> str:
+    """Remove a single leading orphan ": " separator from a chat reply.
+
+    History reconstruction after a reset/fallback can leak a prompt
+    "speaker:" header into the text block, surfacing as a reply that opens
+    with a bare colon. A genuine reply never opens that way, so strip the
+    stray separator (quiet-chat-gateway-management skill § "Syntax
+    Corruption / Prefix Anomalies"). Only the very start is touched; every
+    other character — including internal colons — is left byte-identical.
+    """
+    if not text:
+        return text
+    return _LEADING_ORPHAN_COLON_RE.sub("", text, count=1)
+
+
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     """Sanitize final gateway replies before sending them to chat surfaces.
 
     Every human-facing chat surface (Telegram, WhatsApp, Discord, Slack,
     Signal, Matrix, plugin platforms, etc.) should receive concise, safe
     provider failure categories with secrets redacted instead of raw HTTP
-    bodies, request IDs, leaked credentials, or policy text. Only programmatic
+    bodies, request IDs, leaked credentials, or policy text, and must never
+    open with a stray "": "" scaffolding separator. Only programmatic
     surfaces in ``_GATEWAY_RAW_TEXT_PLATFORMS`` (CLI/TUI ``local`` diagnostics,
     API JSON, webhook payloads) keep the raw text unchanged.
     """
@@ -425,6 +449,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return text
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    redacted = _strip_leading_orphan_colon(redacted)
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -1930,6 +1955,36 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
         f"terminal tool or the ocr-and-documents skill — before answering, instead "
         f"of asking the user to paste the contents.]"
     )
+
+
+def _auto_reset_chat_notice(reset_reason: Optional[str]) -> str:
+    """Warm, metadata-free heads-up when a session is auto-reset.
+
+    Human chat surfaces (WhatsApp, Slack, …) must never see the old
+    technical banner — the ``◐`` glyph, "Conversation history cleared",
+    the ``config.yaml``/``session_reset`` pointer, or the model / provider /
+    context-token block. That reads as robotic system scaffolding and breaks
+    the peer-to-peer illusion (quiet-chat-gateway-management skill §
+    "Discreet or Silent Session Resets"). Return a short, dry, teammate-style
+    line with zero implementation detail — a colleague picking the thread back
+    up, not a status report.
+    """
+    if reset_reason == "suspended":
+        return "picking things back up on a clean thread — what do you need?"
+    if reset_reason == "daily":
+        return "fresh thread for the day — cleared the old one. what's up?"
+    # idle / inactivity / any other auto-reset reason
+    return "been quiet a while so I started a fresh thread — what do you need?"
+
+
+# Warm, metadata-free note appended when a thread outgrows the context window
+# and cannot be compressed further. No "🔄 / maximum context size / compressed
+# further / fresh session" jargon — a teammate flagging a restart, not a
+# diagnostic (quiet-chat-gateway-management skill).
+_CONTEXT_OVERFLOW_RESET_NOTICE = (
+    "this thread got too long for me to keep it all straight, so I'm "
+    "starting us fresh — what were we on?"
+)
 
 
 def _format_duration(seconds: float) -> str:
@@ -9963,31 +10018,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if should_notify:
                     adapter = self.adapters.get(source.platform)
                     if adapter:
-                        if reset_reason == "suspended":
-                            reason_text = "previous session was stopped or interrupted"
-                        elif reset_reason == "daily":
-                            reason_text = f"daily schedule at {policy.at_hour}:00"
-                        else:
-                            hours = policy.idle_minutes // 60
-                            mins = policy.idle_minutes % 60
-                            duration = f"{hours}h" if not mins else f"{hours}h {mins}m" if hours else f"{mins}m"
-                            reason_text = f"inactive for {duration}"
-                        notice = (
-                            f"◐ Session automatically reset ({reason_text}). "
-                            f"Conversation history cleared.\n"
-                            f"Use /resume to browse and restore a previous session.\n"
-                            f"Adjust reset timing in config.yaml under session_reset."
-                        )
-                        try:
-                            session_info = self._format_session_info()
-                            if session_info:
-                                notice = f"{notice}\n\n{session_info}"
-                        except Exception:
-                            pass
-                        await adapter.send(
-                            source.chat_id, notice,
-                            metadata=self._thread_metadata_for_source(source),
-                        )
+                        # Warm, metadata-free heads-up. Never the old
+                        # "◐ Session automatically reset … config.yaml"
+                        # banner or the model/provider/context block — those
+                        # read as robotic scaffolding on a chat surface
+                        # (quiet-chat-gateway-management skill).
+                        notice = _auto_reset_chat_notice(reset_reason)
+                        if notice:
+                            await adapter.send(
+                                source.chat_id, notice,
+                                metadata=self._thread_metadata_for_source(source),
+                            )
             except Exception as e:
                 logger.debug("Auto-reset notification failed (non-fatal): %s", e)
 
@@ -10872,11 +10913,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         self._sync_telegram_topic_binding,
                         source, session_entry, reason="compression-exhausted-reset",
                     )
-                response = (response or "") + (
-                    "\n\n🔄 Session auto-reset — the conversation exceeded the "
-                    "maximum context size and could not be compressed further. "
-                    "Your next message will start a fresh session."
-                )
+                # Warm, metadata-free note (see _CONTEXT_OVERFLOW_RESET_NOTICE)
+                # — no "🔄 / maximum context size / compressed" jargon.
+                response = (response or "") + "\n\n" + _CONTEXT_OVERFLOW_RESET_NOTICE
 
             ts = time.time()  # Unix epoch float — consistent with DB storage
             

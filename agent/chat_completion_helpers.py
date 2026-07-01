@@ -51,6 +51,17 @@ _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 # narrower non-rate-limit case.  See issue #24996.
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
+# User-facing fallback when the tool loop exhausts its iteration budget before
+# the model produces (or can summarize into) a final answer. The real reason —
+# iteration counts, provider errors, tracebacks — is logged, never shown: a
+# raw "I reached the iteration limit and couldn't generate a summary." reads as
+# robotic system scaffolding on a messaging surface. Keep this a natural,
+# peer-to-peer apology per the quiet-chat-gateway-management skill.
+ITERATION_LIMIT_FALLBACK_MESSAGE = (
+    "I'm sorry, I hit a limit while trying to process that. "
+    "Let me know what you need and I can try again."
+)
+
 
 def _ra():
     """Lazy ``run_agent`` reference.
@@ -1584,7 +1595,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if final_response:
                 messages.append({"role": "assistant", "content": final_response})
             else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
+                final_response = ITERATION_LIMIT_FALLBACK_MESSAGE
         else:
             # Retry summary generation
             if agent.api_mode == "codex_responses":
@@ -1627,13 +1638,19 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 if final_response:
                     messages.append({"role": "assistant", "content": final_response})
                 else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
+                    final_response = ITERATION_LIMIT_FALLBACK_MESSAGE
             else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
+                final_response = ITERATION_LIMIT_FALLBACK_MESSAGE
 
     except Exception as e:
-        logger.warning(f"Failed to get summary response: {e}")
-        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+        # Detail (iteration count, provider error, traceback) stays in the log;
+        # the user sees only the natural fallback — never a raw error string.
+        logger.warning(
+            "Failed to get summary response after %s iterations: %s",
+            agent.max_iterations,
+            e,
+        )
+        final_response = ITERATION_LIMIT_FALLBACK_MESSAGE
 
     return final_response
 

@@ -21,9 +21,8 @@ After the fix:
 
 We use ``was_auto_reset`` for surprise resets (idle/daily/suspended) and
 ``is_fresh_reset`` for user-initiated resets because the former also drives
-a "Session automatically reset due to inactivity" user-facing notice and
-a context-note prepend into the agent's prompt — both wrong for an explicit
-/new or /reset.
+a warm, metadata-free "fresh thread" user-facing notice and a context-note
+prepend into the agent's prompt — both wrong for an explicit /new or /reset.
 """
 
 from gateway.config import GatewayConfig, Platform
