@@ -1408,6 +1408,183 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
 
 
+def _gemini_summary_thinking_config(model: str) -> Dict[str, Any]:
+    """Thinking config that keeps a Gemini wrap-up summary from spending its
+    output-token budget on reasoning instead of the summary text.
+
+    ``thinkingBudget=0`` disables thinking outright and is the lever
+    ``tools/voice_reply.py`` pins on its Gemini render call. Verified live on
+    ``gemini-3.5-flash``: with ``thinkingBudget=0`` the summary call reports
+    zero thinking tokens and returns a full coherent summary, whereas the
+    default dynamic-thinking budget (or even ``thinkingLevel=low``) burns the
+    whole output budget on thoughts and returns empty/truncated text.
+
+    Flash / flash-lite families (2.5 + 3.x) honor a 0 budget, so pin it there.
+    Pro is stricter — 2.5 pro rejects a 0 budget outright and 3 pro keeps a
+    thinking floor — so fall back to the lowest documented ``thinkingLevel``
+    for 3-pro and to ``includeThoughts=False`` alone for 2.5-pro.
+    ``includeThoughts=False`` keeps any surfaced thoughts out of the returned
+    summary in every case.
+    """
+    normalized = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/"):]
+    config: Dict[str, Any] = {"includeThoughts": False}
+    is_flash_family = (
+        normalized.startswith(("gemini-3", "gemini-3.1"))
+        or normalized.startswith("gemini-2.5-")
+    ) and "pro" not in normalized
+    if is_flash_family:
+        config["thinkingBudget"] = 0
+    elif normalized.startswith(("gemini-3", "gemini-3.1")):  # gemini-3 pro
+        config["thinkingLevel"] = "low"
+    return config
+
+
+def _apply_summary_no_thinking(agent, summary_extra_body: Dict[str, Any]) -> None:
+    """Force extended thinking OFF for the iteration-limit wrap-up summary.
+
+    A max-iterations summary must spend its output-token budget on the actual
+    summary text, not on reasoning. Reasoning-heavy models (Gemini 3 dynamic
+    thinking in particular) will otherwise burn the whole budget thinking and
+    return empty content (``finish_reason=length``, all thinking, no text),
+    which used to surface the raw "couldn't generate a summary" placeholder.
+    Mirrors ``tools/voice_reply.py``, which pins ``thinking_budget=0`` on its
+    Gemini render call.
+
+    Covers the request shapes the summary path can reach: the OpenAI-compat
+    ``reasoning`` field, native Gemini ``thinking_config``, and the Gemini
+    OpenAI-compat shim's nested ``extra_body.google.thinking_config``.
+    """
+    # OpenAI-compat reasoning-capable routes (OpenRouter, Nous Portal, GitHub
+    # Models). ``_supports_reasoning_extra_body`` is False for native Gemini, so
+    # the Gemini branch below is gated independently on the model family.
+    if agent._supports_reasoning_extra_body():
+        summary_extra_body["reasoning"] = {"enabled": False}
+
+    if "gemini" not in (agent.model or "").lower():
+        return
+
+    thinking_config = _gemini_summary_thinking_config(agent.model)
+    try:
+        from agent.transports.chat_completions import (
+            _is_gemini_openai_compat_base_url,
+            _snake_case_gemini_thinking_config,
+        )
+    except Exception:
+        # Native Gemini reads extra_body["thinking_config"] directly; fall back
+        # to that shape if the transport helpers are unavailable.
+        summary_extra_body["thinking_config"] = thinking_config
+        return
+
+    if _is_gemini_openai_compat_base_url(agent.base_url):
+        snake = _snake_case_gemini_thinking_config(thinking_config)
+        if snake:
+            openai_compat_extra = summary_extra_body.get("extra_body", {})
+            google_extra = openai_compat_extra.get("google", {})
+            google_extra["thinking_config"] = snake
+            openai_compat_extra["google"] = google_extra
+            summary_extra_body["extra_body"] = openai_compat_extra
+    else:
+        summary_extra_body["thinking_config"] = thinking_config
+
+
+def _coerce_tool_result_text(content: Any) -> str:
+    """Best-effort flatten of a tool result's ``content`` to plain text.
+
+    Tool results are usually strings but can be multimodal content lists
+    (text + image parts); pull the text parts out of those.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif isinstance(item, str) and item:
+                parts.append(item)
+        if parts:
+            return "\n".join(parts)
+    return str(content)
+
+
+def build_deterministic_fallback_summary(agent, messages: list) -> str:
+    """Assemble a plain-text "here's what I got done" from message history.
+
+    Used when the iteration-limit summary LLM call returns empty content on
+    both the primary and the retry attempt. We deliberately do NOT make a
+    third LLM call (it can fail the same way) and never surface the raw
+    "couldn't generate a summary" placeholder. Instead we report, from the
+    actual work performed:
+      - how many tool-calling steps ran,
+      - which tools were called (first-seen order), and
+      - the last tool result (truncated),
+    so the user always gets a concrete recap.
+    """
+    tools_in_order: list[str] = []
+    seen_tools: set[str] = set()
+    step_count = 0
+    last_tool_result = ""
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "assistant" and msg.get("tool_calls"):
+            step_count += 1
+            for tc in msg["tool_calls"] or []:
+                fn = tc.get("function") if isinstance(tc, dict) else None
+                name = fn.get("name") if isinstance(fn, dict) else None
+                if isinstance(name, str) and name and name not in seen_tools:
+                    seen_tools.add(name)
+                    tools_in_order.append(name)
+        elif role == "tool":
+            text = _coerce_tool_result_text(msg.get("content")).strip()
+            if text:
+                last_tool_result = text
+
+    max_iter = getattr(agent, "max_iterations", None)
+    limit_clause = (
+        f"after {max_iter} tool-calling iterations"
+        if isinstance(max_iter, int) and max_iter > 0
+        else "after reaching the tool-calling iteration limit"
+    )
+    parts = [
+        f"I hit my working limit {limit_clause} before I could write a clean summary."
+    ]
+
+    if step_count:
+        step_word = "step" if step_count == 1 else "steps"
+        if tools_in_order:
+            shown = tools_in_order[:10]
+            tool_list = ", ".join(shown)
+            if len(tools_in_order) > len(shown):
+                tool_list += f", and {len(tools_in_order) - len(shown)} more"
+            parts.append(
+                f"Here's what I got done: I ran {step_count} tool-calling "
+                f"{step_word} using {tool_list}."
+            )
+        else:
+            parts.append(
+                f"Here's what I got done: I ran {step_count} tool-calling {step_word}."
+            )
+    else:
+        parts.append("I hadn't completed any tool calls yet.")
+
+    if last_tool_result:
+        snippet = " ".join(last_tool_result.split())
+        if len(snippet) > 400:
+            snippet = snippet[:400].rstrip() + "…"
+        parts.append(f"The most recent result was: {snippet}")
+
+    return " ".join(parts)
+
+
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
@@ -1488,18 +1665,17 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             (agent.provider or "").strip().lower() == "lmstudio"
             and agent._supports_reasoning_extra_body()
         )
+        # Wrap-up summaries must not burn the output-token budget on extended
+        # thinking. LM Studio disables it via a top-level reasoning_effort of
+        # "none" (resolved + clamped in _resolve_lmstudio_summary_reasoning_effort);
+        # every other reasoning-capable route is handled by
+        # _apply_summary_no_thinking. See issue tracker.
         _lm_reasoning_effort: str | None = (
             agent._resolve_lmstudio_summary_reasoning_effort()
             if _is_lmstudio_summary else None
         )
-        if not _is_lmstudio_summary and agent._supports_reasoning_extra_body():
-            if agent.reasoning_config is not None:
-                summary_extra_body["reasoning"] = agent.reasoning_config
-            else:
-                summary_extra_body["reasoning"] = {
-                    "enabled": True,
-                    "effort": "medium"
-                }
+        if not _is_lmstudio_summary:
+            _apply_summary_no_thinking(agent, summary_extra_body)
         if _is_nous:
             from agent.portal_tags import nous_portal_tags as _portal_tags
             summary_extra_body["tags"] = _portal_tags()
@@ -1578,15 +1754,14 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 _summary_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_summary_result.content or "").strip()
 
-        if final_response:
-            if "<think>" in final_response:
-                final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
-            if final_response:
-                messages.append({"role": "assistant", "content": final_response})
-            else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
-        else:
-            # Retry summary generation
+        # Strip any inline <think> block the primary attempt returned.
+        if final_response and "<think>" in final_response:
+            final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+
+        if not final_response:
+            # Primary summary came back empty (typically all-thinking, no
+            # text). Retry once — extended thinking is already disabled above,
+            # so the retry gets a fresh shot at spending its budget on text.
             if agent.api_mode == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
                 codex_kwargs.pop("tools", None)
@@ -1621,19 +1796,26 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 _retry_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_retry_result.content or "").strip()
 
-            if final_response:
-                if "<think>" in final_response:
-                    final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
-                if final_response:
-                    messages.append({"role": "assistant", "content": final_response})
-                else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
-            else:
-                final_response = "I reached the iteration limit and couldn't generate a summary."
+            if final_response and "<think>" in final_response:
+                final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+
+        if final_response:
+            messages.append({"role": "assistant", "content": final_response})
+        else:
+            # Primary and retry both empty. Never surface the raw
+            # "couldn't generate a summary" placeholder — assemble a
+            # deterministic recap from history instead of a third LLM call
+            # that can fail the same way.
+            final_response = build_deterministic_fallback_summary(agent, messages)
+            messages.append({"role": "assistant", "content": final_response})
 
     except Exception as e:
         logger.warning(f"Failed to get summary response: {e}")
-        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+        # Even when the summary API call itself fails, give the user the
+        # deterministic recap rather than a bare error — but keep the error
+        # detail appended for debugging.
+        _deterministic = build_deterministic_fallback_summary(agent, messages)
+        final_response = f"{_deterministic}\n\n(Summary generation failed with error: {e})"
 
     return final_response
 

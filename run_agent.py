@@ -5063,15 +5063,19 @@ class AIAgent:
         return opts
 
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
-        """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
+        """Resolve a safe top-level ``reasoning_effort`` for the LM Studio
+        iteration-limit wrap-up summary.
 
-        The iteration-limit summary path calls ``chat.completions.create()``
-        directly, bypassing the transport. Share the helper so the two paths
-        can't drift on effort resolution and clamping.
+        The summary must spend its output-token budget on the summary text,
+        not on thinking, so this resolves from a *disabled* reasoning config
+        ("none", clamped to the model's published allowed options) rather than
+        inheriting the turn's ``reasoning_config``. The summary path calls
+        ``chat.completions.create()`` directly, bypassing the transport;
+        sharing the resolver keeps effort resolution/clamping in one place.
         """
         from agent.lmstudio_reasoning import resolve_lmstudio_effort
         return resolve_lmstudio_effort(
-            self.reasoning_config,
+            {"enabled": False},
             self._lmstudio_reasoning_options_cached(),
         )
 
