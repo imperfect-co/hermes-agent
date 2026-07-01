@@ -227,6 +227,51 @@ def test_telegram_final_response_keeps_normal_answers():
     assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
 
 
+# ---------------------------------------------------------------------------
+# Leading orphan ": " prefix — history-reconstruction scaffolding leak.
+# Symptom: a reply echoing the user's words as ": look for a cheaper option".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_final_response_strips_leading_orphan_colon(platform):
+    """A reply that opens with a stray ": " must have it stripped on chat."""
+    raw = ": look for a less expensive alternative that's 30 - 60 ml"
+
+    sanitized = _sanitize_gateway_final_response(platform, raw)
+
+    assert sanitized == "look for a less expensive alternative that's 30 - 60 ml"
+
+
+def test_final_response_strips_full_width_leading_colon():
+    """Full-width colon scaffolding (CJK transcript paths) is stripped too."""
+    assert (
+        _sanitize_gateway_final_response(Platform.WHATSAPP, "：  hola, ¿qué tal?")
+        == "hola, ¿qué tal?"
+    )
+
+
+def test_final_response_preserves_emoji_shortcode():
+    """`:tada:` has no space after the colon — it is content, not scaffolding."""
+    answer = ":tada: shipped it"
+
+    assert _sanitize_gateway_final_response(Platform.SLACK, answer) == answer
+
+
+def test_final_response_preserves_internal_and_time_colons():
+    """Only a *leading* orphan colon is touched; internal colons stay put."""
+    answer = "Ratio is 3:2 and the sync is at 4:00 — details: below"
+
+    assert _sanitize_gateway_final_response(Platform.WHATSAPP, answer) == answer
+
+
+def test_raw_text_platform_keeps_leading_colon():
+    """Programmatic surfaces (API/CLI) keep raw text, colon and all."""
+    raw = ": raw diagnostic line"
+
+    assert _sanitize_gateway_final_response(Platform.API_SERVER, raw) == raw
+
+
 # Synthetic credential shapes from #23810. Bodies are placeholder gibberish —
 # never real tokens — but they match the canonical redaction patterns. The
 # outbound gateway redactor previously used a narrow local pattern subset that
