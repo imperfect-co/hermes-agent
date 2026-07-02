@@ -192,6 +192,50 @@ class TestSendNativeVoiceNote:
         assert "Here is the deploy" in spoken_arg
 
     @pytest.mark.asyncio
+    async def test_truncated_long_reply_returns_false_to_keep_text(self, tmp_path):
+        # A reply longer than the TTS cap is spoken only up to the cap. The
+        # voice note still ships (head-start), but the method must report NOT
+        # spoken so the caller keeps the FULL text reply — the user must never
+        # silently lose the tail of a long message.
+        runner = _render_runner()
+        event = _event()
+        long_text = "word " * 1200  # 6000 chars > 4000-char cap
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
+
+        with patch(
+            "tools.voice_reply.render_voice_note", return_value=rendered
+        ) as render:
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, long_text
+            )
+
+        assert delivered is False
+        # The voice note is still rendered and delivered (partial head-start),
+        # only the text-suppression signal is withheld.
+        render.assert_called_once()
+        runner._deliver_voice_audio.assert_awaited_once()
+        # Only the first 4000 chars reach TTS.
+        spoken_arg = render.call_args.args[0]
+        assert len(spoken_arg) <= 4000 + len(
+            "[Voice direction: idiomatic English as spoken in the United States]\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reply_at_cap_boundary_still_spoken(self, tmp_path):
+        # Exactly at the cap is fully voiced — return True to suppress the text.
+        runner = _render_runner()
+        event = _event()
+        at_cap = "a" * 4000
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
+
+        with patch("tools.voice_reply.render_voice_note", return_value=rendered):
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, at_cap
+            )
+
+        assert delivered is True
+
+    @pytest.mark.asyncio
     async def test_render_failure_returns_false(self, tmp_path):
         runner = _render_runner()
         event = _event()

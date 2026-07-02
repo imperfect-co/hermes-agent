@@ -978,6 +978,12 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "image_generate",
 }
 
+# Hard character cap on the reply text handed to TTS for a voice-note reply.
+# Matches the conservative Gemini per-request input limit
+# (tts_tool.FALLBACK_MAX_TEXT_LENGTH). Text longer than this is spoken only up
+# to the cap, so a truncated voice note must never suppress the full text reply.
+_VOICE_NOTE_TTS_CAP = 4000
+
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
 
 # Replay-tail sanitization lives in agent/replay_cleanup.py so every resume
@@ -12123,7 +12129,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # ``_strip_markdown_for_tts`` also drops bare URLs and keeps only the
         # link *text* of ``[label](url)`` markdown — so nothing unspeakable
         # (a raw URL) reaches Charon.
-        spoken = _strip_markdown_for_tts(text[:4000])
+        # A reply longer than the TTS cap is spoken only up to the cap; track
+        # that so we never suppress the full text reply for a voice note that
+        # covered only the head of a long message.
+        truncated = len(text) > _VOICE_NOTE_TTS_CAP
+        spoken = _strip_markdown_for_tts(text[:_VOICE_NOTE_TTS_CAP])
         if not spoken:
             return False
 
@@ -12149,9 +12159,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 locale=profile.locale,
                 base_gemini_config=gemini_cfg,
             )
-            # Only report "delivered" (which suppresses the text reply) when the
-            # audio actually reached the user; a failed send falls back to text.
-            return bool(await self._deliver_voice_audio(event, part.path))
+            # Report "spoken" (which suppresses the duplicate text reply) only
+            # when the audio actually reached the user AND the whole reply was
+            # voiced. A reply truncated to the TTS cap keeps its full text reply
+            # so the user never silently loses the tail — the partial voice note
+            # still ships as a head-start.
+            delivered = bool(await self._deliver_voice_audio(event, part.path))
+            return delivered and not truncated
         except VoiceRenderError as e:
             logger.warning(
                 "tts_reply: voice render failed; falling back to text reply: %s", e
@@ -12230,7 +12244,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
 
-            tts_text = _strip_markdown_for_tts(text[:4000])
+            tts_text = _strip_markdown_for_tts(text[:_VOICE_NOTE_TTS_CAP])
             if not tts_text:
                 return False
 
