@@ -84,6 +84,13 @@ def test_pre_llm_call_injects_policy(platform, expected):
     assert "NO_REPLY" in out["context"]
 
 
+def test_policy_advertises_middle_finger_and_skin_tone():
+    # The two capabilities this plugin gained must be teachable to the model.
+    ctx = sr._pre_llm_call(platform="slack")["context"]
+    assert "middle_finger" in ctx
+    assert "skin-tone-5" in ctx  # brown, the example tone
+
+
 @pytest.mark.parametrize("platform", ["discord", "telegram", "", None])
 def test_pre_llm_call_skips_other_platforms(platform):
     assert sr._pre_llm_call(platform=platform) is None
@@ -144,6 +151,34 @@ def test_slack_reaction_count_capped(monkeypatch):
     assert len(adapter.calls) == sr._MAX_REACTIONS_PER_RESPONSE
 
 
+def test_slack_middle_finger(monkeypatch):
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    out = sr._transform_llm_output(platform="slack", response_text="[[react:middle_finger]]")
+    assert out == "NO_REPLY"
+    assert adapter.calls == [("C1", "111.222", "middle_finger")]
+
+
+def test_slack_brown_middle_finger_keeps_native_name(monkeypatch):
+    # Slack's toned-reaction name is passed verbatim: base::skin-tone-N.
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    out = sr._transform_llm_output(
+        platform="slack", response_text="[[react:middle_finger::skin-tone-5]] NO_REPLY"
+    )
+    assert out == "NO_REPLY"
+    assert adapter.calls == [("C1", "111.222", "middle_finger::skin-tone-5")]
+
+
+def test_slack_skin_tone_dropped_for_non_capable_emoji(monkeypatch):
+    # A tone requested on a non-hand emoji is dropped; the base reacts plain
+    # (Slack would reject "tada::skin-tone-5" as an invalid name).
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    sr._transform_llm_output(platform="slack", response_text="[[react:tada::skin-tone-5]] NO_REPLY")
+    assert adapter.calls == [("C1", "111.222", "tada")]
+
+
 # ---------------------------------------------------------------------------
 # transform_llm_output — WhatsApp (shortcode -> unicode, participant)
 # ---------------------------------------------------------------------------
@@ -193,6 +228,84 @@ def test_whatsapp_group_passes_participant(monkeypatch):
     )
     sr._transform_llm_output(platform="whatsapp", response_text="[[react:tada]] NO_REPLY")
     assert adapter.calls[0]["participant"] == "789@s.whatsapp.net"
+
+
+# ---------------------------------------------------------------------------
+# Middle finger + skin tones (the feature this plugin gained)
+# ---------------------------------------------------------------------------
+
+def test_whatsapp_middle_finger_plain(monkeypatch):
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    sr._transform_llm_output(platform="whatsapp", response_text="[[react:middle_finger]] NO_REPLY")
+    assert adapter.calls[0]["emoji"] == "\U0001F595"  # 🖕
+
+
+def test_whatsapp_brown_middle_finger(monkeypatch):
+    # Base emoji + Fitzpatrick medium-dark modifier = 🖕🏾.
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    sr._transform_llm_output(
+        platform="whatsapp", response_text="[[react:middle_finger::skin-tone-5]] NO_REPLY"
+    )
+    assert adapter.calls[0]["emoji"] == "\U0001F595\U0001F3FE"
+
+
+@pytest.mark.parametrize(
+    "tone,modifier",
+    [
+        ("skin-tone-2", "\U0001F3FB"),
+        ("skin-tone-3", "\U0001F3FC"),
+        ("skin-tone-4", "\U0001F3FD"),
+        ("skin-tone-5", "\U0001F3FE"),
+        ("skin-tone-6", "\U0001F3FF"),
+    ],
+)
+def test_whatsapp_all_skin_tones_on_thumbsup(monkeypatch, tone, modifier):
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    sr._transform_llm_output(
+        platform="whatsapp", response_text=f"[[react:+1::{tone}]] NO_REPLY"
+    )
+    assert adapter.calls[0]["emoji"] == "\U0001F44D" + modifier
+
+
+def test_whatsapp_skin_tone_dropped_for_non_capable_emoji(monkeypatch):
+    # 🎉 can't carry a tone: deliver the plain base, not a broken 2-glyph seq.
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    sr._transform_llm_output(
+        platform="whatsapp", response_text="[[react:tada::skin-tone-5]] NO_REPLY"
+    )
+    assert adapter.calls[0]["emoji"] == "\U0001F389"  # 🎉, no modifier
+
+
+def test_invalid_skin_tone_directive_is_left_intact(monkeypatch):
+    # skin-tone-9 is out of range → the directive doesn't match, so it is NOT
+    # treated as a reaction and NOT stripped (no valid shortcode was emitted).
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    assert (
+        sr._transform_llm_output(
+            platform="slack", response_text="[[react:middle_finger::skin-tone-9]]"
+        )
+        is None
+    )
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "shortcode,expected",
+    [
+        ("middle_finger", ("middle_finger", None)),
+        ("middle_finger::skin-tone-5", ("middle_finger", "skin-tone-5")),
+        ("+1::skin-tone-2", ("+1", "skin-tone-2")),
+        ("tada::skin-tone-5", ("tada", None)),  # not skin-tone-capable → dropped
+        ("+1", ("+1", None)),
+    ],
+)
+def test_split_skin_tone(shortcode, expected):
+    assert sr._split_skin_tone(shortcode) == expected
 
 
 # ---------------------------------------------------------------------------

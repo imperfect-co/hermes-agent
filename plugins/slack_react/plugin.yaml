@@ -1,5 +1,5 @@
 name: slack_react
-version: 2.0.0
+version: 2.1.0
 description: >-
   Emoji reactions for Slack and WhatsApp. Lets the agent use its own judgment to
   react to the triggering message with an emoji (e.g. :+1: for "thanks" or
