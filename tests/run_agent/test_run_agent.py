@@ -3840,6 +3840,137 @@ class TestHandleMaxIterations:
         # path too (finally), leaving the caller's config intact.
         assert agent.reasoning_config == {"enabled": True, "effort": "high"}
 
+    # ── Additional regression coverage for the #42 rework ────────────────────
+    def test_summary_thinking_only_primary_retries_before_placeholder(self, agent):
+        """Regression: previously, a primary response that stripped to empty
+        (all reasoning tags, no visible text) went straight to the raw
+        placeholder without a retry — only a genuinely empty ``content`` on
+        the API response triggered the retry. Now the strip happens first and
+        *then* the empty-check runs, so a think-only primary also gets a
+        retry attempt before any fallback."""
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="<think>only reasoning, no summary</think>"),
+            _mock_response(content="Real summary after retry."),
+        ]
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Real summary after retry."
+        assert agent.client.chat.completions.create.call_count == 2
+
+    def test_summary_strips_thinking_tag_variant(self, agent):
+        """Regression: the summary path used to strip only a literal
+        "<think>...</think>" substring via a local regex. It now reuses the
+        shared ``agent._strip_think_blocks`` stripper, which also handles the
+        "<thinking>" tag variant (and others)."""
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="<thinking>internal notes</thinking>Visible summary text."
+        )
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Visible summary text."
+        assert "thinking" not in result.lower()
+
+    def test_summary_no_thinking_config_added_for_non_reasoning_non_gemini(self, agent):
+        """A model that is neither Gemini nor reasoning-capable must get
+        neither a "reasoning" nor a "thinking_config" key on the summary
+        request — ``_apply_summary_no_thinking`` is a no-op for it."""
+        agent.base_url = "https://api.openai.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "openai"
+        agent.model = "gpt-4o-mini"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        extra_body = agent.client.chat.completions.create.call_args.kwargs.get("extra_body", {})
+        assert "reasoning" not in extra_body
+        assert "thinking_config" not in extra_body
+
+    def test_summary_lmstudio_ignores_configured_reasoning_effort(self, agent):
+        """LM Studio's summary reasoning_effort must be resolved from a
+        *disabled* config, never from the turn's configured
+        ``agent.reasoning_config`` — even a high-effort configured turn must
+        send "none" for the wrap-up summary."""
+        agent.provider = "lmstudio"
+        agent.base_url = "http://localhost:1234/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "some-local-model"
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=["off", "on"]):
+            result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert kwargs.get("reasoning_effort") == "none"
+        # The turn's configured reasoning is untouched afterward.
+        assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    def test_summary_lmstudio_omits_reasoning_effort_when_none_unsupported(self, agent):
+        """If the model's published allowed_options don't include an "off"/
+        "none" option, the resolver must omit reasoning_effort entirely
+        rather than send an unsupported value."""
+        agent.provider = "lmstudio"
+        agent.base_url = "http://localhost:1234/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "some-local-model"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=["minimal", "low"]):
+            result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert "reasoning_effort" not in kwargs
+
+    def test_deterministic_fallback_truncates_long_last_tool_result(self, agent):
+        """The deterministic recap must truncate a long last tool result to
+        400 characters with an ellipsis, not dump the raw text."""
+        agent.client.chat.completions.create.return_value = _mock_response(content="")
+        agent._cached_system_prompt = "You are helpful."
+        long_result = "x" * 500
+        messages = [
+            {"role": "user", "content": "do stuff"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": long_result},
+        ]
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert "x" * 400 in result
+        assert "x" * 401 not in result
+        assert "…" in result
+
+    def test_deterministic_fallback_lists_at_most_ten_tools(self, agent):
+        """The deterministic recap must cap the shown tool list at 10 and
+        note how many more were called, instead of an unbounded list."""
+        agent.client.chat.completions.create.return_value = _mock_response(content="")
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{"role": "user", "content": "do stuff"}]
+        for i in range(13):
+            tool_name = f"tool_{i}"
+            messages.append(
+                {"role": "assistant", "tool_calls": [{"id": f"c{i}", "function": {"name": tool_name, "arguments": "{}"}}]}
+            )
+            messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert "tool_0" in result
+        assert "tool_9" in result
+        assert "tool_10" not in result
+        assert "3 more" in result
+        assert "13 tool-calling steps" in result
+
     def test_codex_summary_sanitizes_orphan_tool_results(self, agent):
         agent.api_mode = "codex_responses"
         agent.provider = "openai-codex"
@@ -3906,6 +4037,329 @@ class TestHandleMaxIterations:
         assert [m.get("tool_call_id") for m in sanitized if m.get("role") == "tool"] == [
             "call_123"
         ]
+
+
+class TestCoerceToolResultText:
+    """Direct tests for ``_coerce_tool_result_text`` (#42): best-effort
+    flattening of a tool result's ``content`` to plain text, used by
+    ``build_deterministic_fallback_summary`` when scanning tool messages."""
+
+    def _coerce(self, content):
+        from agent.chat_completion_helpers import _coerce_tool_result_text
+        return _coerce_tool_result_text(content)
+
+    def test_none_returns_empty_string(self):
+        assert self._coerce(None) == ""
+
+    def test_plain_string_passthrough(self):
+        assert self._coerce("exit code 0") == "exit code 0"
+
+    def test_empty_string_passthrough(self):
+        assert self._coerce("") == ""
+
+    def test_list_of_text_dicts_joined_with_newline(self):
+        content = [{"type": "text", "text": "first part"}, {"type": "text", "text": "second part"}]
+        assert self._coerce(content) == "first part\nsecond part"
+
+    def test_list_of_plain_strings_joined(self):
+        assert self._coerce(["line one", "line two"]) == "line one\nline two"
+
+    def test_list_skips_non_text_parts(self):
+        """Multimodal content lists (text + image parts) must only surface
+        the text parts."""
+        content = [
+            {"type": "text", "text": "here is the screenshot"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+        assert self._coerce(content) == "here is the screenshot"
+
+    def test_list_skips_empty_text_and_non_string_items(self):
+        content = [{"text": ""}, {"text": 123}, None, {"no_text_key": True}, "kept"]
+        assert self._coerce(content) == "kept"
+
+    def test_list_with_no_extractable_text_falls_back_to_str(self):
+        """When a list has no usable text parts, fall back to str(content)
+        rather than silently returning an empty string."""
+        content = [{"type": "image_url", "image_url": {"url": "x"}}]
+        assert self._coerce(content) == str(content)
+
+    def test_empty_list_falls_back_to_str(self):
+        assert self._coerce([]) == "[]"
+
+    def test_non_string_non_list_falls_back_to_str(self):
+        assert self._coerce(42) == "42"
+        assert self._coerce({"foo": "bar"}) == str({"foo": "bar"})
+
+
+class TestGeminiSummaryThinkingConfigEdgeCases:
+    """Additional edge cases for ``_gemini_summary_thinking_config`` (#42)
+    beyond the per-family happy-path coverage in TestHandleMaxIterations."""
+
+    def _config(self, model):
+        from agent.chat_completion_helpers import _gemini_summary_thinking_config
+        return _gemini_summary_thinking_config(model)
+
+    def test_none_model_returns_base_config_only(self):
+        assert self._config(None) == {"includeThoughts": False}
+
+    def test_empty_model_returns_base_config_only(self):
+        assert self._config("") == {"includeThoughts": False}
+
+    def test_unrelated_gemini_family_returns_base_config_only(self):
+        """gemini-1.x is neither the 3.x line nor 2.5, so only the base
+        includeThoughts=False guard applies (no budget/level lever)."""
+        assert self._config("gemini-1.5-flash") == {"includeThoughts": False}
+
+    def test_case_insensitive_normalization(self):
+        assert self._config("GEMINI-3.5-FLASH") == {
+            "includeThoughts": False, "thinkingBudget": 0,
+        }
+
+    def test_provider_prefixed_model_id_normalizes(self):
+        assert self._config("google/gemini-3.5-flash") == {
+            "includeThoughts": False, "thinkingBudget": 0,
+        }
+
+    def test_pro_substring_anywhere_excludes_flash_budget_path(self):
+        """Any "pro" substring in a 2.5 model id disqualifies it from the
+        flash-family thinkingBudget=0 path, matching the documented Pro
+        restriction (2.5 pro rejects a 0 budget outright)."""
+        assert self._config("gemini-2.5-flash-pro-preview") == {"includeThoughts": False}
+
+    def test_whitespace_is_stripped(self):
+        assert self._config("  gemini-3.5-flash  ") == {
+            "includeThoughts": False, "thinkingBudget": 0,
+        }
+
+
+class TestApplySummaryNoThinking:
+    """Direct tests for ``_apply_summary_no_thinking`` (#42): the request
+    mutation applied to the summary path's extra_body before dispatch."""
+
+    def _agent(self, model="", base_url="", supports_reasoning=False):
+        a = MagicMock()
+        a.model = model
+        a.base_url = base_url
+        a._supports_reasoning_extra_body.return_value = supports_reasoning
+        return a
+
+    def test_reasoning_capable_non_gemini_sets_reasoning_disabled(self):
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(model="deepseek/deepseek-v3.2", supports_reasoning=True)
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body == {"reasoning": {"enabled": False}}
+
+    def test_non_reasoning_non_gemini_is_a_no_op(self):
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(model="gpt-4o-mini", supports_reasoning=False)
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body == {}
+
+    def test_native_gemini_base_url_sets_thinking_config(self):
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(
+            model="gemini-3.5-flash",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            supports_reasoning=False,
+        )
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body == {
+            "thinking_config": {"includeThoughts": False, "thinkingBudget": 0}
+        }
+
+    def test_gemini_openai_compat_shim_nests_snake_case_config(self):
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(
+            model="gemini-3.5-flash",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            supports_reasoning=False,
+        )
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body == {
+            "extra_body": {
+                "google": {
+                    "thinking_config": {
+                        "include_thoughts": False, "thinking_budget": 0,
+                    }
+                }
+            }
+        }
+
+    def test_reasoning_capable_gemini_sets_both_reasoning_and_thinking(self):
+        """A route that is both reasoning-extra_body-capable and Gemini
+        (e.g. Gemini served through an OpenRouter-style reasoning-capable
+        route) gets both dials set, since the two branches are independent."""
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(
+            model="google/gemini-3.5-flash",
+            base_url="https://openrouter.ai/api/v1",
+            supports_reasoning=True,
+        )
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body["reasoning"] == {"enabled": False}
+        assert extra_body["thinking_config"] == {
+            "includeThoughts": False, "thinkingBudget": 0,
+        }
+
+    def test_transport_helper_import_failure_falls_back_to_native_shape(self):
+        """If the transport helpers can't be imported for any reason, the
+        function must still disable thinking using the native
+        extra_body["thinking_config"] shape rather than raising or silently
+        doing nothing."""
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(
+            model="gemini-3.5-flash",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            supports_reasoning=False,
+        )
+        extra_body = {}
+
+        with patch.dict("sys.modules", {"agent.transports.chat_completions": None}):
+            _apply_summary_no_thinking(agent, extra_body)
+
+        assert extra_body == {
+            "thinking_config": {"includeThoughts": False, "thinkingBudget": 0}
+        }
+
+    def test_model_without_gemini_substring_skips_thinking_config(self):
+        """Gate is a plain substring check on the model name; a non-Gemini
+        model must never get a thinking_config key even if reasoning is
+        also disabled by the first branch."""
+        from agent.chat_completion_helpers import _apply_summary_no_thinking
+        agent = self._agent(model="anthropic/claude-opus-4-8", supports_reasoning=True)
+        extra_body = {}
+
+        _apply_summary_no_thinking(agent, extra_body)
+
+        assert "thinking_config" not in extra_body
+        assert "extra_body" not in extra_body
+
+
+class TestBuildDeterministicFallbackSummary:
+    """Direct tests for ``build_deterministic_fallback_summary`` (#42): the
+    plain-text recap assembled from message history when the summary LLM
+    call returns empty content on both the primary and retry attempts."""
+
+    def _build(self, messages, max_iterations=None):
+        from agent.chat_completion_helpers import build_deterministic_fallback_summary
+        agent = SimpleNamespace(max_iterations=max_iterations)
+        return build_deterministic_fallback_summary(agent, messages)
+
+    def test_no_tool_calls_reports_none_completed(self):
+        result = self._build([{"role": "user", "content": "hello"}], max_iterations=10)
+        assert "hadn't completed any tool calls" in result
+        assert "after 10 tool-calling iterations" in result
+
+    def test_missing_max_iterations_uses_generic_clause(self):
+        result = self._build([{"role": "user", "content": "hello"}], max_iterations=None)
+        assert "after reaching the tool-calling iteration limit" in result
+
+    def test_non_positive_max_iterations_uses_generic_clause(self):
+        result = self._build([{"role": "user", "content": "hello"}], max_iterations=0)
+        assert "after reaching the tool-calling iteration limit" in result
+
+    def test_single_tool_call_uses_singular_step(self):
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "I ran 1 tool-calling step using terminal" in result
+        assert "steps" not in result
+        assert "terminal" in result
+
+    def test_duplicate_tool_names_listed_once_first_seen_order(self):
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "web_search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": "ok"},
+            {"role": "assistant", "tool_calls": [{"id": "c3", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c3", "content": "ok"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "3 tool-calling steps" in result
+        assert result.count("terminal") == 1
+        assert "terminal, web_search" in result
+
+    def test_last_tool_result_is_the_most_recent_one(self):
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "first result"},
+            {"role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "web_search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": "second and final result"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "second and final result" in result
+        assert "first result" not in result
+
+    def test_whitespace_in_last_tool_result_is_collapsed(self):
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "line one\n\n   line two\ttab"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "line one line two tab" in result
+
+    def test_blank_tool_result_is_ignored(self):
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "   "},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "most recent result" not in result
+
+    def test_non_dict_messages_are_skipped_without_crashing(self):
+        messages = [
+            "not a dict",
+            None,
+            42,
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "terminal" in result
+
+    def test_malformed_tool_call_entries_are_skipped_without_crashing(self):
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    "not a dict",
+                    {"id": "c1"},  # missing "function"
+                    {"id": "c2", "function": "not a dict"},
+                    {"id": "c3", "function": {"name": 123}},  # non-string name
+                    {"id": "c4", "function": {"name": "terminal", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c4", "content": "ok"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "terminal" in result
+        assert "1 tool-calling step" in result
+
+    def test_assistant_message_without_tool_calls_does_not_count_as_step(self):
+        messages = [
+            {"role": "assistant", "content": "just chatting, no tools"},
+            {"role": "user", "content": "hello"},
+        ]
+        result = self._build(messages, max_iterations=5)
+        assert "hadn't completed any tool calls" in result
 
 
 class TestRunConversation:
@@ -7527,6 +7981,68 @@ class TestSupportsReasoningExtraBody:
         ):
             agent.model = model
             assert agent._supports_reasoning_extra_body() is True, model
+
+    def test_gemini_3_openrouter_models_are_treated_as_reasoning_capable(self):
+        """google/gemini-3* on OpenRouter must be recognized as
+        reasoning-capable (new prefix added alongside google/gemini-2)."""
+        agent = self._make_agent()
+        for model in (
+            "google/gemini-3.5-flash",
+            "google/gemini-3-pro",
+        ):
+            agent.model = model
+            assert agent._supports_reasoning_extra_body() is True, model
+
+    def test_gemini_1_openrouter_model_is_not_reasoning_capable(self):
+        """Only the gemini-2 and gemini-3 prefixes are recognized; older
+        gemini families are not treated as reasoning-capable."""
+        agent = self._make_agent()
+        agent.model = "google/gemini-1.5-pro"
+        assert agent._supports_reasoning_extra_body() is False
+
+
+class TestResolveLmstudioSummaryReasoningEffort:
+    """``_resolve_lmstudio_summary_reasoning_effort`` (#42) must always
+    resolve from a *disabled* reasoning config, ignoring whatever the turn's
+    ``agent.reasoning_config`` is set to, so the wrap-up summary never
+    inherits the turn's thinking effort."""
+
+    def _make_agent(self, reasoning_config=None):
+        agent = object.__new__(AIAgent)
+        agent.provider = "lmstudio"
+        agent.base_url = "http://localhost:1234/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "some-local-model"
+        agent.reasoning_config = reasoning_config
+        return agent
+
+    def test_toggle_style_model_resolves_to_none_regardless_of_configured_effort(self):
+        agent = self._make_agent(reasoning_config={"enabled": True, "effort": "high"})
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=["off", "on"]):
+            assert agent._resolve_lmstudio_summary_reasoning_effort() == "none"
+
+    def test_graduated_model_without_none_option_omits_effort(self):
+        """When the model's allowed_options don't include an "off"/"none"
+        option, resolution must return None (omit the field) rather than
+        send an unsupported value."""
+        agent = self._make_agent(reasoning_config={"enabled": True, "effort": "high"})
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=["minimal", "low"]):
+            assert agent._resolve_lmstudio_summary_reasoning_effort() is None
+
+    def test_probe_failure_still_resolves_to_none(self):
+        """An empty (falsy) allowed_options list means the probe failed;
+        clamping is skipped and the resolved "none" is sent anyway."""
+        agent = self._make_agent(reasoning_config={"enabled": True, "effort": "high"})
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=[]):
+            assert agent._resolve_lmstudio_summary_reasoning_effort() == "none"
+
+    def test_configured_reasoning_disabled_does_not_change_result(self):
+        """Regardless of whether the turn's reasoning_config was enabled or
+        disabled, the summary resolver ignores it entirely and always starts
+        from {"enabled": False}."""
+        agent = self._make_agent(reasoning_config={"enabled": False})
+        with patch.object(agent, "_lmstudio_reasoning_options_cached", return_value=["off", "on"]):
+            assert agent._resolve_lmstudio_summary_reasoning_effort() == "none"
 
 
 class TestMemoryContextSanitization:
