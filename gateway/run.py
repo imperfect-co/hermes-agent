@@ -10747,6 +10747,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
+            # Preserve a clean pre-footer reply string for voice replies (TTS)
+            voice_response = response
+
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
 
@@ -11032,12 +11035,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
+                voice_response = ""
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
             _voice_note_delivered = False
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
-                _voice_note_delivered = bool(await self._send_voice_reply(event, response))
+            if self._should_send_voice_reply(event, voice_response, agent_messages, already_sent=_already_sent):
+                _voice_note_delivered = bool(await self._send_voice_reply(event, voice_response, inbound_text=message_text))
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -12099,7 +12103,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return bool(getattr(result, "success", True))
         return False
 
-    async def _send_native_voice_note(self, event: MessageEvent, text: str) -> bool:
+    async def _send_native_voice_note(self, event: MessageEvent, text: str, inbound_text: str = None) -> bool:
         """ADR 0024 Phase 1: render the reply as an opus voice note and deliver it.
 
         Compose-then-render: the brain already wrote ``text``; here we render it
@@ -12137,7 +12141,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not spoken:
             return False
 
-        profile = detect_voice_profile(event.text or "")
+        inbound_str = ""
+        if inbound_text:
+            inbound_str = inbound_text
+        elif event.text:
+            inbound_str = event.text
+        profile = detect_voice_profile(inbound_str)
         # Prepend the non-spoken steering cue; Gemini treats a leading
         # bracketed direction as delivery style, not transcript to read aloud.
         tts_text = f"{profile.direction}\n{spoken}"
@@ -12226,7 +12235,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as e:
             logger.warning("tts_reply: link follow-up send failed: %s", e)
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> bool:
+    async def _send_voice_reply(self, event: MessageEvent, text: str, inbound_text: str = None) -> bool:
         """Generate TTS audio and send as a voice message before the text reply.
 
         Returns ``True`` only when a native voice-note reply (``voice.tts_reply``)
@@ -12236,7 +12245,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Voice-note replies (ADR 0024) supersede the legacy provider-agnostic
         # TTS path when enabled.
         if self._native_audio_out_enabled():
-            return await self._send_native_voice_note(event, text)
+            return await self._send_native_voice_note(event, text, inbound_text=inbound_text)
 
         import uuid as _uuid
         audio_path = None

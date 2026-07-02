@@ -175,6 +175,27 @@ class TestSendNativeVoiceNote:
         )
 
     @pytest.mark.asyncio
+    async def test_detects_locale_from_inbound_text_override(self, tmp_path):
+        # When inbound_text override is provided, we should use it for locale detection.
+        runner = _render_runner()
+        event = _event(text="English text")
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="es-MX")
+
+        with patch(
+            "tools.voice_reply.render_voice_note", return_value=rendered
+        ) as render:
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, "Sure, the deploy is live now.", inbound_text="Hola ¿cómo estás?"
+            )
+
+        assert delivered is True
+        _, kwargs = render.call_args
+        assert kwargs["locale"] == "es-MX"
+        assert render.call_args.args[0].startswith(
+            "[Voice direction: idiomatic Spanish as spoken in Mexico]"
+        )
+
+    @pytest.mark.asyncio
     async def test_urls_stripped_from_spoken_text(self, tmp_path):
         runner = _render_runner()
         event = _event()
