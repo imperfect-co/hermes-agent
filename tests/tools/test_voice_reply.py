@@ -92,6 +92,13 @@ class TestDetectVoiceLocale:
         assert detect_voice_language(text) == "en"
         assert detect_voice_locale(text) == "en-US"
 
+    @pytest.mark.parametrize("text", ["﷐ stray", "﷯ end", "plain﷐"])
+    def test_noncharacters_are_not_farsi(self, text):
+        # U+FDD0–U+FDEF are Unicode noncharacters inside the Arabic Presentation
+        # Forms-A block; they are unassigned and must not read as Farsi.
+        assert detect_voice_language(text) == "en"
+        assert detect_voice_locale(text) == "en-US"
+
 
 # ---------------------------------------------------------------------------
 # Idiomatic voice profile + non-spoken steering direction
@@ -142,6 +149,24 @@ class TestExtractUrls:
             "https://example.com/path"
         ]
         assert extract_urls("(see http://x.io/a)") == ["http://x.io/a"]
+
+    def test_keeps_balanced_trailing_bracket(self):
+        # A balanced ")" is part of the URL path (Wikipedia-style), not
+        # sentence punctuation — stripping it would ship a broken link.
+        assert extract_urls(
+            "See https://en.wikipedia.org/wiki/Mercury_(planet)"
+        ) == ["https://en.wikipedia.org/wiki/Mercury_(planet)"]
+        # ...and a trailing sentence period after the balanced pair still goes.
+        assert extract_urls(
+            "done https://en.wikipedia.org/wiki/Mercury_(planet)."
+        ) == ["https://en.wikipedia.org/wiki/Mercury_(planet)"]
+
+    def test_trims_trailing_non_ascii_punctuation(self):
+        # Arabic comma (U+060C) after a link in a Farsi reply must not glue to
+        # the URL — fa-IR is a first-class spoken locale.
+        assert extract_urls("لینک: https://example.com/report، ادامه") == [
+            "https://example.com/report"
+        ]
 
     @pytest.mark.parametrize("text", ["", "no links here", "ftp://not-http.example"])
     def test_none_found(self, text):

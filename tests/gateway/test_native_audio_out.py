@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from tools.voice_reply import RenderedVoiceNote, VoiceRenderError
@@ -218,6 +218,78 @@ class TestSendNativeVoiceNote:
         render.assert_not_called()
         runner._deliver_voice_audio.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_delivery_failure_returns_false(self, tmp_path):
+        # Render succeeds but the adapter fails to deliver (e.g. send_voice
+        # returns SendResult(success=False)): must report NOT delivered so the
+        # caller falls back to the text reply instead of suppressing it.
+        runner = SimpleNamespace(
+            _native_audio_out_render_config=lambda: ("Charon", {}),
+            _deliver_voice_audio=AsyncMock(return_value=False),
+        )
+        event = _event()
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
+
+        with patch("tools.voice_reply.render_voice_note", return_value=rendered):
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, "Hello there"
+            )
+
+        assert delivered is False
+        runner._deliver_voice_audio.assert_awaited_once()
+
+
+def _voice_delivery_runner(adapter):
+    return SimpleNamespace(
+        adapters={Platform.WHATSAPP_CLOUD: adapter},
+        _get_guild_id=lambda event: None,
+        _reply_anchor_for_event=lambda event: "anchor-1",
+        _thread_metadata_for_source=lambda source, anchor: {"thread_id": "t1"},
+    )
+
+
+class TestDeliverVoiceAudio:
+    @pytest.mark.asyncio
+    async def test_returns_true_when_send_voice_succeeds(self):
+        adapter = SimpleNamespace(
+            send_voice=AsyncMock(
+                return_value=SendResult(success=True, message_id="m1")
+            )
+        )
+        runner = _voice_delivery_runner(adapter)
+        ok = await GatewayRunner._deliver_voice_audio(runner, _event(), "/tmp/x.ogg")
+        assert ok is True
+        adapter.send_voice.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_send_voice_reports_failure(self):
+        # Adapters report transport failures via SendResult(success=False)
+        # WITHOUT raising — delivery must be reported as failed so the caller
+        # keeps the text fallback.
+        adapter = SimpleNamespace(
+            send_voice=AsyncMock(
+                return_value=SendResult(success=False, error="upload rejected")
+            )
+        )
+        runner = _voice_delivery_runner(adapter)
+        ok = await GatewayRunner._deliver_voice_audio(runner, _event(), "/tmp/x.ogg")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_send_voice_returns_none(self):
+        # Older adapters return None on success; don't over-suppress the text.
+        adapter = SimpleNamespace(send_voice=AsyncMock(return_value=None))
+        runner = _voice_delivery_runner(adapter)
+        ok = await GatewayRunner._deliver_voice_audio(runner, _event(), "/tmp/x.ogg")
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_voice_capability(self):
+        adapter = SimpleNamespace()  # neither send_voice nor a voice channel
+        runner = _voice_delivery_runner(adapter)
+        ok = await GatewayRunner._deliver_voice_audio(runner, _event(), "/tmp/x.ogg")
+        assert ok is False
+
 
 def _followup_runner():
     adapter = SimpleNamespace(send=AsyncMock(), name="whatsapp_cloud")
@@ -259,17 +331,35 @@ class TestSendLinkFollowup:
         )
         assert adapter.send.call_args.args[1] == "https://a.com\nhttps://b.com"
 
+    @pytest.mark.asyncio
+    async def test_no_text_send_capability_warns_not_silent(self, caplog):
+        # Voice-primary stripped the URL from the spoken note and suppressed the
+        # text, so a link that can't be sent is lost — it must warn, not drop
+        # silently.
+        adapter = SimpleNamespace(name="voice_only")  # no `send`
+        runner = SimpleNamespace(
+            adapters={Platform.WHATSAPP_CLOUD: adapter},
+            _reply_anchor_for_event=lambda event: "anchor-1",
+            _thread_metadata_for_source=lambda source, anchor: {},
+        )
+        event = _event()
+        with caplog.at_level("WARNING"):
+            await GatewayRunner._send_link_followup(
+                runner, event, "grab it at https://example.com/x"
+            )
+        assert "could not be delivered" in caplog.text
+
 
 class TestNativeAudioOutEnabled:
     def test_new_tts_reply_key(self):
         runner = SimpleNamespace()
         with patch(
-            "hermes_cli.config.load_config",
+            "hermes_cli.config.load_config_readonly",
             return_value={"voice": {"tts_reply": True}},
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is True
         with patch(
-            "hermes_cli.config.load_config",
+            "hermes_cli.config.load_config_readonly",
             return_value={"voice": {"tts_reply": False}},
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is False
@@ -278,17 +368,17 @@ class TestNativeAudioOutEnabled:
         # Backwards compatibility: configs written before the rename still work.
         runner = SimpleNamespace()
         with patch(
-            "hermes_cli.config.load_config",
+            "hermes_cli.config.load_config_readonly",
             return_value={"voice": {"native_audio_out": True}},
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is True
-        with patch("hermes_cli.config.load_config", return_value={"voice": {}}):
+        with patch("hermes_cli.config.load_config_readonly", return_value={"voice": {}}):
             assert GatewayRunner._native_audio_out_enabled(runner) is False
 
     def test_new_key_takes_precedence_over_legacy(self):
         runner = SimpleNamespace()
         with patch(
-            "hermes_cli.config.load_config",
+            "hermes_cli.config.load_config_readonly",
             return_value={"voice": {"tts_reply": False, "native_audio_out": True}},
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is False
@@ -296,7 +386,7 @@ class TestNativeAudioOutEnabled:
     def test_render_config_defaults_to_charon(self):
         runner = SimpleNamespace()
         with patch(
-            "hermes_cli.config.load_config",
+            "hermes_cli.config.load_config_readonly",
             return_value={"tts": {"gemini": {"model": "m"}}},
         ):
             voice, cfg = GatewayRunner._native_audio_out_render_config(runner)

@@ -11936,7 +11936,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         compatibility with configs written before the rename.
         """
         try:
-            from hermes_cli.config import load_config as _load_full_config
+            # Read-only feature-flag check on the per-turn hot path: use the
+            # deepcopy-free reader (see load_config_readonly docstring). We only
+            # read voice.tts_reply / voice.native_audio_out here — no mutation.
+            from hermes_cli.config import load_config_readonly as _load_full_config
             _cfg = _load_full_config()
             voice_cfg = _cfg.get("voice") or {}
             if "tts_reply" in voice_cfg:
@@ -11950,7 +11953,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         voice = "Charon"
         gemini_cfg: Dict[str, Any] = {}
         try:
-            from hermes_cli.config import load_config as _load_full_config
+            # Read-only reader on the voice-reply path; we copy the gemini dict
+            # (dict(raw)) before returning and never mutate the shared config.
+            from hermes_cli.config import load_config_readonly as _load_full_config
             _cfg = _load_full_config()
             voice = str(
                 (_cfg.get("voice") or {}).get("native_audio_voice") or "Charon"
@@ -12035,12 +12040,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return True
 
-    async def _deliver_voice_audio(self, event: MessageEvent, audio_path: str) -> None:
+    async def _deliver_voice_audio(self, event: MessageEvent, audio_path: str) -> bool:
         """Deliver a rendered audio file as a voice message.
 
         Plays into a connected voice channel when available, otherwise hands the
         file to the platform adapter's ``send_voice``. Shared by the legacy TTS
         reply and the native audio output (ADR 0024) reply paths.
+
+        Returns ``True`` only when the audio was actually handed off — played
+        into a voice channel, or accepted by ``send_voice`` (a truthy/absent
+        ``SendResult.success``). Returns ``False`` when there is no delivery
+        channel or the adapter reported failure, so voice-primary callers don't
+        suppress the text reply for a voice note that never reached the user.
         """
         adapter = self.adapters.get(event.source.platform)
 
@@ -12051,7 +12062,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and hasattr(adapter, "is_in_voice_channel")
                 and adapter.is_in_voice_channel(guild_id)):
             await adapter.play_in_voice_channel(guild_id, audio_path)
-        elif adapter and hasattr(adapter, "send_voice"):
+            return True
+        if adapter and hasattr(adapter, "send_voice"):
             reply_anchor = self._reply_anchor_for_event(event)
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
             # Mark the voice reply as notify-worthy.  Mirrors the final-text
@@ -12072,7 +12084,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "reply_to": reply_anchor,
                 "metadata": thread_meta,
             }
-            await adapter.send_voice(**send_kwargs)
+            # Adapters report transport failures via ``SendResult(success=False)``
+            # WITHOUT raising, so a discarded result would let the caller treat a
+            # failed send as delivered and suppress the text fallback. Treat a
+            # missing/None result as success (older adapters return None) so we
+            # never over-suppress.
+            result = await adapter.send_voice(**send_kwargs)
+            return bool(getattr(result, "success", True))
+        return False
 
     async def _send_native_voice_note(self, event: MessageEvent, text: str) -> bool:
         """ADR 0024 Phase 1: render the reply as an opus voice note and deliver it.
@@ -12130,8 +12149,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 locale=profile.locale,
                 base_gemini_config=gemini_cfg,
             )
-            await self._deliver_voice_audio(event, part.path)
-            return True
+            # Only report "delivered" (which suppresses the text reply) when the
+            # audio actually reached the user; a failed send falls back to text.
+            return bool(await self._deliver_voice_audio(event, part.path))
         except VoiceRenderError as e:
             logger.warning(
                 "tts_reply: voice render failed; falling back to text reply: %s", e
@@ -12166,8 +12186,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
         adapter = self.adapters.get(event.source.platform)
         if not adapter or not hasattr(adapter, "send"):
+            # Voice-primary already suppressed the text and stripped the URL from
+            # the spoken note, so a missing text channel means the link is lost.
+            # Warn loud rather than dropping it silently.
+            logger.warning(
+                "tts_reply: %d link(s) could not be delivered — %s adapter has no "
+                "text send; link(s) dropped from the voice-primary reply",
+                len(urls), event.source.platform,
+            )
             return
         reply_anchor = self._reply_anchor_for_event(event)
+        # Clone-before-mutate + notify=True mirrors _deliver_voice_audio (see the
+        # rationale there): never mutate metadata shared with concurrent
+        # typing-indicator state, and mark the follow-up notify-worthy.
         thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
         thread_meta = dict(thread_meta) if thread_meta else {}
         thread_meta["notify"] = True
