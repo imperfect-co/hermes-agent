@@ -78,6 +78,20 @@ class TestDetectVoiceLocale:
     def test_detect_voice_language(self, text, language):
         assert detect_voice_language(text) == language
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "﻿hello there",  # leading BOM must not read as Farsi
+            "﻿",             # bare BOM
+            "plain english﻿",
+        ],
+    )
+    def test_bom_is_not_farsi(self, text):
+        # U+FEFF (BOM / zero-width no-break space) sits just past the Arabic
+        # Presentation Forms-B letters; it must not trigger Farsi detection.
+        assert detect_voice_language(text) == "en"
+        assert detect_voice_locale(text) == "en-US"
+
 
 # ---------------------------------------------------------------------------
 # Idiomatic voice profile + non-spoken steering direction

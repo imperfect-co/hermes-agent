@@ -1,9 +1,12 @@
 # Voice-note replies (native audio out) — deployment config
 
-Hermes can answer with a **spoken voice note** (opus-in-ogg) instead of — or
-alongside — a plain text reply. The brain (`gemini-3.5-flash`) writes the reply
-text as usual, then the gateway renders that text to a native voice-note bubble
-via Gemini TTS (`Charon`, ADR 0024 Phase 1).
+Hermes can answer with a **spoken voice note** (opus-in-ogg) *in place of* the
+plain text reply. The brain (`gemini-3.5-flash`) writes the reply text as usual,
+then the gateway renders that text to a native voice-note bubble via Gemini TTS
+(`Charon`, ADR 0024 Phase 1). When rendering succeeds the voice note is
+voice-primary: the duplicate text is **not** re-sent — the only text that
+follows is a short link follow-up (see below). Text is used as a fallback only
+when the render fails.
 
 ## Enabling it
 

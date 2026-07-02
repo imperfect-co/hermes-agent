@@ -64,11 +64,14 @@ _SPANISH_STOPWORDS = frozenset(
 )
 _WORD_RE = re.compile(r"[a-zñáéíóúü]+")
 # Perso-Arabic script blocks: Arabic (U+0600-06FF, includes the Persian
-# letters پ چ ژ گ ک ی), Arabic Supplement (U+0750-077F), and the Arabic
-# Presentation Forms (U+FB50-FDFF, U+FE70-FEFF). Any hit is a strong,
-# unambiguous Farsi signal — no Latin-script language we target uses it.
+# letters پ چ ژ گ ک ی), Arabic Supplement (U+0750-077F), Arabic Presentation
+# Forms-A (U+FB50-FDFF), and Arabic Presentation Forms-B letters
+# (U+FE70-FEFC). The range stops at U+FEFC on purpose so the U+FEFF BOM /
+# zero-width no-break space can't masquerade as a Farsi character. Any hit is
+# a strong, unambiguous Farsi signal — no Latin-script language we target
+# uses these blocks.
 _FARSI_RE = re.compile(
-    "[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]"
+    "[؀-ۿݐ-ݿﭐ-﷿ﹰ-ﻼ]"
 )
 
 # language key -> (BCP-47 locale, language display, idiomatic territory).
