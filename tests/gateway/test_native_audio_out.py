@@ -125,75 +125,57 @@ def _render_runner():
 
 
 class TestSendNativeVoiceNote:
+    @pytest.mark.parametrize(
+        "inbound_text, override_inbound, reply_text, expected_locale, expected_prefix",
+        [
+            (
+                "Hello",
+                None,
+                "Hello there",
+                "en-US",
+                "[Voice direction: idiomatic English as spoken in the United States]"
+            ),
+            (
+                "Hola, ¿me puedes ayudar con el despliegue?",
+                None,
+                "Sure, the deploy is live now.",
+                "es-MX",
+                "[Voice direction: idiomatic Spanish as spoken in Mexico]"
+            ),
+            (
+                "English text",
+                "Hola ¿cómo estás?",
+                "Sure, the deploy is live now.",
+                "es-MX",
+                "[Voice direction: idiomatic Spanish as spoken in Mexico]"
+            ),
+        ]
+    )
     @pytest.mark.asyncio
-    async def test_delivers_structured_part_and_reports_delivered(self, tmp_path):
+    async def test_delivers_structured_part_and_reports_delivered_parametrized(
+        self, tmp_path, inbound_text, override_inbound, reply_text, expected_locale, expected_prefix
+    ):
         runner = _render_runner()
-        event = _event()
-        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
+        event = _event(text=inbound_text)
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale=expected_locale)
 
         with patch(
             "tools.voice_reply.render_voice_note", return_value=rendered
         ) as render:
             delivered = await GatewayRunner._send_native_voice_note(
-                runner, event, "Hello there"
+                runner, event, reply_text, inbound_text=override_inbound
             )
 
-        # Returns True so the caller suppresses the duplicate text reply.
         assert delivered is True
         runner._deliver_voice_audio.assert_awaited_once()
         args = runner._deliver_voice_audio.call_args.args
         assert args[0] is event
         assert args[1] == rendered.path
-        # English inbound -> en-US + English steering direction prepended.
+
         _, kwargs = render.call_args
-        assert kwargs["locale"] == "en-US"
+        assert kwargs["locale"] == expected_locale
         spoken_arg = render.call_args.args[0]
-        assert spoken_arg.startswith(
-            "[Voice direction: idiomatic English as spoken in the United States]"
-        )
-
-    @pytest.mark.asyncio
-    async def test_locale_detected_from_inbound_not_reply(self, tmp_path):
-        # Inbound is Spanish; the English reply text must still be voiced in
-        # idiomatic Mexican Spanish (detection runs on event.text).
-        runner = _render_runner()
-        event = _event(text="Hola, ¿me puedes ayudar con el despliegue?")
-        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="es-MX")
-
-        with patch(
-            "tools.voice_reply.render_voice_note", return_value=rendered
-        ) as render:
-            delivered = await GatewayRunner._send_native_voice_note(
-                runner, event, "Sure, the deploy is live now."
-            )
-
-        assert delivered is True
-        _, kwargs = render.call_args
-        assert kwargs["locale"] == "es-MX"
-        assert render.call_args.args[0].startswith(
-            "[Voice direction: idiomatic Spanish as spoken in Mexico]"
-        )
-
-    @pytest.mark.asyncio
-    async def test_detects_locale_from_inbound_text_override(self, tmp_path):
-        # When inbound_text override is provided, we should use it for locale detection.
-        runner = _render_runner()
-        event = _event(text="English text")
-        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="es-MX")
-
-        with patch(
-            "tools.voice_reply.render_voice_note", return_value=rendered
-        ) as render:
-            delivered = await GatewayRunner._send_native_voice_note(
-                runner, event, "Sure, the deploy is live now.", inbound_text="Hola ¿cómo estás?"
-            )
-
-        assert delivered is True
-        _, kwargs = render.call_args
-        assert kwargs["locale"] == "es-MX"
-        assert render.call_args.args[0].startswith(
-            "[Voice direction: idiomatic Spanish as spoken in Mexico]"
-        )
+        assert spoken_arg.startswith(expected_prefix)
 
     @pytest.mark.asyncio
     async def test_urls_stripped_from_spoken_text(self, tmp_path):
@@ -447,6 +429,11 @@ class TestNativeAudioOutEnabled:
             return_value={"voice": {"tts_reply": False, "native_audio_out": True}},
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is False
+        with patch(
+            "hermes_cli.config.load_config_readonly",
+            return_value={"voice": {"tts_reply": True, "native_audio_out": False}},
+        ):
+            assert GatewayRunner._native_audio_out_enabled(runner) is True
 
     def test_render_config_defaults_to_charon(self):
         runner = SimpleNamespace()

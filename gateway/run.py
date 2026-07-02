@@ -12141,16 +12141,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not spoken:
             return False
 
-        inbound_str = ""
-        if inbound_text:
-            inbound_str = inbound_text
-        elif event.text:
-            inbound_str = event.text
-        profile = detect_voice_profile(inbound_str)
-        # Prepend the non-spoken steering cue; Gemini treats a leading
-        # bracketed direction as delivery style, not transcript to read aloud.
-        tts_text = f"{profile.direction}\n{spoken}"
-
         out_path = os.path.join(
             tempfile.gettempdir(), "hermes_voice",
             f"native_reply_{_uuid.uuid4().hex[:12]}.ogg",
@@ -12160,6 +12150,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         part = None
         try:
+            inbound_str = ""
+            if inbound_text:
+                inbound_str = inbound_text
+            elif event.text:
+                inbound_str = event.text
+            profile = detect_voice_profile(inbound_str)
+            # Prepend the non-spoken steering cue; Gemini treats a leading
+            # bracketed direction as delivery style, not transcript to read aloud.
+            tts_text = f"{profile.direction}\n{spoken}"
+
             part = await asyncio.to_thread(
                 render_voice_note,
                 tts_text,
