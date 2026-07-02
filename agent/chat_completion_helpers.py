@@ -1838,7 +1838,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         # before it reaches final_response, the session transcript, OR the log
         # line below (#19798-class leak), instead of str(e) verbatim.
         _error_detail = agent._summarize_api_error(e)
-        logger.warning("Failed to get summary response: %s", _error_detail)
+        logger.warning("Failed to get summary response: %s", type(e).__name__)
         _deterministic = build_deterministic_fallback_summary(agent, messages)
         final_response = (
             f"{_deterministic}\n\n"
