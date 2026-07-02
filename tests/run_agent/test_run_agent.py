@@ -3592,6 +3592,254 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         assert "sort" not in kwargs.get("extra_body", {}).get("provider", {})
 
+    # ── Extended-thinking disabled for the wrap-up summary (issue #42) ──────
+    def test_summary_disables_thinking_for_gemini3_native(self, agent):
+        """Native Gemini 3 flash summary must pin thinkingBudget=0 +
+        includeThoughts=False so reasoning can't eat the whole output budget
+        and return empty content (verified live on gemini-3.5-flash)."""
+        agent.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "gemini"
+        agent.model = "gemini-3.5-flash"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Gemini summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Gemini summary"
+        extra_body = agent.client.chat.completions.create.call_args.kwargs.get("extra_body", {})
+        assert extra_body.get("thinking_config") == {
+            "includeThoughts": False,
+            "thinkingBudget": 0,
+        }
+        # Native Gemini isn't a reasoning-extra_body route, so no reasoning key.
+        assert "reasoning" not in extra_body
+
+    def test_summary_disables_thinking_for_gemini25_flash(self, agent):
+        """Gemini 2.5 flash honors thinkingBudget=0 to disable thinking."""
+        agent.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "gemini"
+        agent.model = "gemini-2.5-flash"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        extra_body = agent.client.chat.completions.create.call_args.kwargs.get("extra_body", {})
+        assert extra_body.get("thinking_config") == {
+            "includeThoughts": False,
+            "thinkingBudget": 0,
+        }
+
+    def test_summary_disables_thinking_for_gemini_openai_compat_shim(self, agent):
+        """The Gemini OpenAI-compat shim nests thinking config under
+        extra_body.google.thinking_config (snake_case)."""
+        agent.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "gemini"
+        agent.model = "gemini-3.5-flash"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        extra_body = agent.client.chat.completions.create.call_args.kwargs.get("extra_body", {})
+        assert extra_body["extra_body"]["google"]["thinking_config"] == {
+            "include_thoughts": False,
+            "thinking_budget": 0,
+        }
+
+    def test_gemini_summary_thinking_config_per_family(self):
+        """thinkingBudget=0 for flash families; thinkingLevel=low for 3-pro;
+        includeThoughts-only for 2.5-pro and unknown gemini."""
+        from agent.chat_completion_helpers import _gemini_summary_thinking_config
+
+        assert _gemini_summary_thinking_config("gemini-3.5-flash") == {
+            "includeThoughts": False, "thinkingBudget": 0}
+        assert _gemini_summary_thinking_config("gemini-2.5-flash-lite") == {
+            "includeThoughts": False, "thinkingBudget": 0}
+        # Provider-prefixed and models/-prefixed ids normalize the same way.
+        assert _gemini_summary_thinking_config("models/gemini-3.5-flash") == {
+            "includeThoughts": False, "thinkingBudget": 0}
+        assert _gemini_summary_thinking_config("gemini-3-pro") == {
+            "includeThoughts": False, "thinkingLevel": "low"}
+        # 2.5 pro rejects a 0 budget — includeThoughts only.
+        assert _gemini_summary_thinking_config("gemini-2.5-pro") == {
+            "includeThoughts": False}
+
+    def test_summary_disables_reasoning_for_reasoning_capable_openrouter(self, agent):
+        """Reasoning-capable OpenRouter models must send reasoning disabled for
+        the summary rather than enabling medium effort."""
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "openrouter"
+        agent.model = "deepseek/deepseek-v3.2"
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        extra_body = agent.client.chat.completions.create.call_args.kwargs.get("extra_body", {})
+        assert extra_body.get("reasoning") == {"enabled": False}
+
+    def test_max_iterations_disables_thinking_anthropic(self, agent):
+        """Anthropic Messages summary path must build its request with reasoning
+        disabled — even when the agent is configured for high-effort thinking —
+        so the wrap-up spends its output budget on text, not reasoning (#42).
+        The swap routes through agent.reasoning_config, and build_kwargs() must
+        see {"enabled": False}; the original config is restored afterward."""
+        agent.api_mode = "anthropic_messages"
+        agent.base_url = "https://api.anthropic.com"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "anthropic"
+        agent.model = "claude-opus-4-8"
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent._cached_system_prompt = "You are helpful."
+
+        captured = {}
+        fake_transport = MagicMock()
+
+        def _capture_build_kwargs(**kwargs):
+            captured.update(kwargs)
+            return {"model": kwargs.get("model"), "messages": kwargs.get("messages")}
+
+        fake_transport.build_kwargs.side_effect = _capture_build_kwargs
+        fake_transport.normalize_response.return_value = SimpleNamespace(
+            content="Anthropic summary"
+        )
+
+        with (
+            patch.object(agent, "_get_transport", return_value=fake_transport),
+            patch.object(agent, "_anthropic_messages_create", return_value=MagicMock()),
+        ):
+            result = agent._handle_max_iterations(
+                [{"role": "user", "content": "do stuff"}], 60
+            )
+
+        assert result == "Anthropic summary"
+        # Thinking suppressed on the summary request regardless of api_mode.
+        assert captured["reasoning_config"] == {"enabled": False}
+        # ...and the agent's configured reasoning is restored afterward.
+        assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    def test_max_iterations_disables_thinking_codex(self, agent):
+        """Codex Responses summary path must build its request with reasoning
+        disabled: the real codex transport emits no ``reasoning`` key when
+        agent.reasoning_config is {"enabled": False}, even though the agent was
+        configured for high-effort thinking (#42). Config restored afterward."""
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "chatgpt.com"
+        agent.model = "gpt-5.5"
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent._cached_system_prompt = "You are helpful."
+
+        captured = {}
+
+        def fake_run_codex_stream(kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                status="completed",
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text="Codex summary")],
+                    )
+                ],
+            )
+
+        with patch.object(agent, "_run_codex_stream", side_effect=fake_run_codex_stream):
+            result = agent._handle_max_iterations(
+                [{"role": "user", "content": "do stuff"}], 60
+            )
+
+        assert result == "Codex summary"
+        # Reasoning disabled → the Responses request carries no reasoning dial.
+        assert "reasoning" not in captured
+        # ...and the agent's configured reasoning is restored afterward.
+        assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    # ── Deterministic fallback when the summary LLM call is empty (issue #42) ─
+    def test_empty_summary_falls_back_to_deterministic_recap(self, agent):
+        """When primary + retry both return empty content, never surface the
+        raw placeholder — assemble a recap from history (steps, tools, last
+        result) in code."""
+        agent.model = "gemini-3.5-flash"
+        agent.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "gemini"
+        agent.max_iterations = 12
+        agent.client.chat.completions.create.return_value = _mock_response(content="")
+        agent._cached_system_prompt = "You are helpful."
+        messages = [
+            {"role": "user", "content": "investigate the outage"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "exit 0", "tool_name": "terminal"},
+            {"role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "web_search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": "found 3 relevant incidents", "tool_name": "web_search"},
+        ]
+
+        result = agent._handle_max_iterations(messages, 12)
+
+        assert result != "I reached the iteration limit and couldn't generate a summary."
+        assert "couldn't generate a summary" not in result
+        assert "2 tool-calling steps" in result
+        assert "terminal" in result and "web_search" in result
+        assert "found 3 relevant incidents" in result
+        # The deterministic recap is recorded as the final assistant turn.
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == result
+        # Primary summary + one retry both fire: an empty primary must trigger
+        # exactly one more attempt before the deterministic fallback.
+        assert agent.client.chat.completions.create.call_count == 2
+
+    def test_empty_summary_recap_with_no_tools(self, agent):
+        """Deterministic recap degrades gracefully when no tools were called."""
+        agent.max_iterations = 5
+        agent.client.chat.completions.create.return_value = _mock_response(content="")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 5)
+
+        assert "couldn't generate a summary" not in result
+        assert "hadn't completed any tool calls" in result
+        # Primary summary + one retry both fire before the deterministic recap.
+        assert agent.client.chat.completions.create.call_count == 2
+
+    def test_exception_path_includes_deterministic_recap(self, agent):
+        """When the summary API call throws, the user still gets the recap plus
+        the error detail (not just a bare error). The reasoning override must be
+        restored even when the summary call fails (finally runs on error)."""
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent.client.chat.completions.create.side_effect = Exception("provider 500")
+        agent._cached_system_prompt = "You are helpful."
+        messages = [
+            {"role": "user", "content": "do stuff"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "some output"},
+        ]
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert "terminal" in result
+        assert "provider 500" in result
+        assert "error" in result.lower()
+        # The recap is recorded as the final assistant turn so the summary
+        # user-turn doesn't dangle in history.
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == result
+        # The temporary {"enabled": False} override is rolled back on the error
+        # path too (finally), leaving the caller's config intact.
+        assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
     def test_codex_summary_sanitizes_orphan_tool_results(self, agent):
         agent.api_mode = "codex_responses"
         agent.provider = "openai-codex"
