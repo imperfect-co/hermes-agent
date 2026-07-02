@@ -3,7 +3,8 @@
 These prove the [[react:EMOJI]] path end-to-end against fakes:
   * react-only ([[react:+1]] NO_REPLY) fires exactly one reaction and returns
     the NO_REPLY silence token,
-  * react+reply fires the reaction and returns the cleaned text,
+  * a substantive reply beside a directive SUPPRESSES the reaction and returns
+    the cleaned text — a reaction and a reply are mutually exclusive (never both),
   * reactions are resolved from the per-turn HERMES_SESSION_* context vars
     (NOT SessionEntry.origin),
   * WhatsApp shortcodes are mapped to literal unicode and group reactions
@@ -82,6 +83,8 @@ def test_pre_llm_call_injects_policy(platform, expected):
     assert "[[react:EMOJI]]" in out["context"]
     assert expected in out["context"]
     assert "NO_REPLY" in out["context"]
+    # The policy must teach the model the mutual-exclusivity rule.
+    assert "never send both" in out["context"]
 
 
 @pytest.mark.parametrize("platform", ["discord", "telegram", "", None])
@@ -101,14 +104,16 @@ def test_slack_react_only_returns_no_reply(monkeypatch):
     assert adapter.calls == [("C9", "ts9", "+1")]
 
 
-def test_slack_react_plus_reply_returns_clean_text(monkeypatch):
+def test_slack_reply_present_suppresses_reaction(monkeypatch):
+    # A substantive reply and a reaction are mutually exclusive: the reply wins
+    # and the reaction is dropped (never both).
     adapter = FakeSlackAdapter()
     _patch_target(monkeypatch, adapter)
     out = sr._transform_llm_output(
         platform="slack", response_text="[[react:eyes]] looking into it now"
     )
     assert out == "looking into it now"
-    assert adapter.calls == [("C1", "111.222", "eyes")]
+    assert adapter.calls == []  # reaction suppressed — text reply present
 
 
 def test_slack_shortcode_lowercased(monkeypatch):
@@ -127,21 +132,70 @@ def test_slack_bare_directive_is_silent(monkeypatch):
 
 
 def test_slack_multiple_directives_dedup(monkeypatch):
+    # React-only turn (NO_REPLY), so the reactions actually fire and the dedup
+    # path runs: duplicate +1 collapses to one call.
     adapter = FakeSlackAdapter()
     _patch_target(monkeypatch, adapter)
     out = sr._transform_llm_output(
-        platform="slack", response_text="[[react:+1]][[react:tada]][[react:+1]] thanks all"
+        platform="slack",
+        response_text="[[react:+1]][[react:tada]][[react:+1]] NO_REPLY",
     )
-    assert out == "thanks all"
+    assert out == "NO_REPLY"
     assert adapter.calls == [("C1", "111.222", "+1"), ("C1", "111.222", "tada")]
 
 
 def test_slack_reaction_count_capped(monkeypatch):
+    # React-only turn so the reactions fire; the per-response cap still bounds them.
     adapter = FakeSlackAdapter()
     _patch_target(monkeypatch, adapter)
     directives = "".join(f"[[react:r{i}]]" for i in range(sr._MAX_REACTIONS_PER_RESPONSE + 3))
-    sr._transform_llm_output(platform="slack", response_text=directives + " done")
+    sr._transform_llm_output(platform="slack", response_text=directives + " NO_REPLY")
     assert len(adapter.calls) == sr._MAX_REACTIONS_PER_RESPONSE
+
+
+# ---------------------------------------------------------------------------
+# transform_llm_output — reaction / reply are mutually exclusive (never both)
+# ---------------------------------------------------------------------------
+
+def test_slack_checkmark_plus_long_message_drops_reaction(monkeypatch):
+    # Regression for the reported bad interaction: the agent reacted ✅ AND sent
+    # a long conversational message. The reply must win; the reaction is dropped.
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    reply = (
+        "Yes — I fixed the bug, deployed it, and confirmed the fix in prod. "
+        "Here's a summary of what changed and why."
+    )
+    out = sr._transform_llm_output(
+        platform="slack",
+        response_text=f"[[react:white_check_mark]] {reply}",
+    )
+    assert out == reply
+    assert adapter.calls == []  # ✅ reaction suppressed — reply only
+
+
+def test_whatsapp_reply_present_suppresses_reaction(monkeypatch):
+    adapter = FakeWhatsAppAdapter()
+    _patch_target(monkeypatch, adapter, chat_id="123@s.whatsapp.net", message_id="M1")
+    out = sr._transform_llm_output(
+        platform="whatsapp",
+        response_text="[[react:+1]] On it — I'll have this wrapped up within the hour.",
+    )
+    assert out == "On it — I'll have this wrapped up within the hour."
+    assert adapter.calls == []  # reaction suppressed — reply only
+
+
+def test_directive_after_reply_still_suppresses_reaction(monkeypatch):
+    # The directive can appear anywhere; a reply beside it still counts as
+    # substantive, so the reaction is dropped and the text delivered.
+    adapter = FakeSlackAdapter()
+    _patch_target(monkeypatch, adapter)
+    out = sr._transform_llm_output(
+        platform="slack",
+        response_text="Shipping the release now. [[react:tada]]",
+    )
+    assert out == "Shipping the release now."
+    assert adapter.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -162,11 +216,12 @@ def test_whatsapp_maps_shortcode_to_unicode(monkeypatch):
 def test_whatsapp_skips_unmapped_shortcode(monkeypatch):
     adapter = FakeWhatsAppAdapter()
     _patch_target(monkeypatch, adapter)
+    # React-only turn so the reaction path runs, but the shortcode has no unicode
+    # mapping → nothing delivered, and the turn stays silent.
     out = sr._transform_llm_output(
-        platform="whatsapp", response_text="[[react:zzz_unknown]] hello"
+        platform="whatsapp", response_text="[[react:zzz_unknown]] NO_REPLY"
     )
-    # Directive stripped from text, but nothing delivered (no unicode mapping).
-    assert out == "hello"
+    assert out == "NO_REPLY"
     assert adapter.calls == []
 
 
