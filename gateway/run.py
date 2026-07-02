@@ -11029,8 +11029,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
+            _voice_note_delivered = False
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
-                await self._send_voice_reply(event, response)
+                _voice_note_delivered = bool(await self._send_voice_reply(event, response))
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -11067,8 +11068,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            # Voice-note reply is voice-primary (ADR 0024): the spoken note IS
+            # the reply, so suppress the duplicate text send. Media attachments
+            # still go out, and any link — which a voice note can't convey —
+            # rides a short follow-up text (voice + text combo). Only reached in
+            # the non-streaming path; the streaming branch above already
+            # delivered the text (with its link) and returned.
+            if _voice_note_delivered:
+                _voice_adapter = self.adapters.get(source.platform)
+                if _voice_adapter and response:
+                    await self._deliver_media_from_response(response, event, _voice_adapter)
+                await self._send_link_followup(event, response)
+                return None
+
             return response
-            
+
         except Exception as e:
             # Stop typing indicator on error too
             try:
@@ -11914,15 +11928,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         await adapter.handle_message(event)
 
     def _native_audio_out_enabled(self) -> bool:
-        """Whether native audio output (ADR 0024) is enabled via config.
+        """Whether voice-note replies (``voice.tts_reply``, ADR 0024) are on.
 
-        Reads ``voice.native_audio_out`` from config.yaml fresh each call so a
-        config reload takes effect without a restart.
+        Reads config.yaml fresh each call so a config reload takes effect
+        without a restart. Prefers the current ``voice.tts_reply`` key and
+        falls back to the legacy ``voice.native_audio_out`` for backwards
+        compatibility with configs written before the rename.
         """
         try:
             from hermes_cli.config import load_config as _load_full_config
             _cfg = _load_full_config()
-            return bool((_cfg.get("voice") or {}).get("native_audio_out", False))
+            voice_cfg = _cfg.get("voice") or {}
+            if "tts_reply" in voice_cfg:
+                return bool(voice_cfg.get("tts_reply"))
+            return bool(voice_cfg.get("native_audio_out", False))
         except Exception:
             return False
 
@@ -11954,7 +11973,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Two selection policies are OR'd together:
 
-        - Native audio output (ADR 0024), when ``voice.native_audio_out`` is on:
+        - Voice-note replies (``voice.tts_reply``, ADR 0024), when enabled:
           speak iff the inbound message was a voice note OR the user explicitly
           asked for a spoken reply in text. Independent of the /voice toggle.
         - Legacy /voice toggle: ``voice_mode`` ``all`` (always) or
@@ -12055,22 +12074,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             }
             await adapter.send_voice(**send_kwargs)
 
-    async def _send_native_voice_note(self, event: MessageEvent, text: str) -> None:
+    async def _send_native_voice_note(self, event: MessageEvent, text: str) -> bool:
         """ADR 0024 Phase 1: render the reply as an opus voice note and deliver it.
 
         Compose-then-render: the brain already wrote ``text``; here we render it
-        to an opus-in-ogg voice note (Gemini TTS, ``Charon``, locale-aware) and
-        deliver it as a first-class structured part. On render failure we log
-        loud and return — the plain text reply is delivered by the normal path,
+        to an opus-in-ogg voice note (Gemini TTS, ``Charon``, natural 1x speed)
+        and deliver it as a first-class structured part.
+
+        The spoken accent/locale is detected from the *inbound* message
+        (``event.text``) — not our reply — and steered toward the idiomatic
+        territory (Spanish -> es-MX, Farsi -> fa-IR) via a non-spoken
+        ``[Voice direction: ...]`` prefix. URLs are stripped from the spoken
+        text (a voice note can't convey a link); the caller delivers any link
+        on a short follow-up text.
+
+        Returns ``True`` when a voice note was delivered (so the caller can
+        suppress the duplicate text reply), ``False`` on render/delivery
+        failure — where the plain text reply is delivered by the normal path,
         so the user still gets the answer (fail-loud fallback).
         """
         import uuid as _uuid
         from tools.tts_tool import _strip_markdown_for_tts
-        from tools.voice_reply import render_voice_note, VoiceRenderError
+        from tools.voice_reply import (
+            render_voice_note,
+            VoiceRenderError,
+            detect_voice_profile,
+        )
 
-        tts_text = _strip_markdown_for_tts(text[:4000])
-        if not tts_text:
-            return
+        # ``_strip_markdown_for_tts`` also drops bare URLs and keeps only the
+        # link *text* of ``[label](url)`` markdown — so nothing unspeakable
+        # (a raw URL) reaches Charon.
+        spoken = _strip_markdown_for_tts(text[:4000])
+        if not spoken:
+            return False
+
+        profile = detect_voice_profile(event.text or "")
+        # Prepend the non-spoken steering cue; Gemini treats a leading
+        # bracketed direction as delivery style, not transcript to read aloud.
+        tts_text = f"{profile.direction}\n{spoken}"
 
         out_path = os.path.join(
             tempfile.gettempdir(), "hermes_voice",
@@ -12086,17 +12127,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 tts_text,
                 out_path,
                 voice=voice,
+                locale=profile.locale,
                 base_gemini_config=gemini_cfg,
             )
             await self._deliver_voice_audio(event, part.path)
+            return True
         except VoiceRenderError as e:
             logger.warning(
-                "native_audio_out: voice render failed; falling back to text reply: %s", e
+                "tts_reply: voice render failed; falling back to text reply: %s", e
             )
+            return False
         except Exception as e:
             logger.warning(
-                "native_audio_out: voice delivery failed: %s", e, exc_info=True
+                "tts_reply: voice delivery failed: %s", e, exc_info=True
             )
+            return False
         finally:
             cleanup = {out_path}
             if part is not None:
@@ -12107,13 +12152,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except OSError:
                     pass
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
-        """Generate TTS audio and send as a voice message before the text reply."""
-        # Native audio output (ADR 0024) supersedes the legacy provider-agnostic
+    async def _send_link_followup(self, event: MessageEvent, text: str) -> None:
+        """Send any link(s) in ``text`` as a short follow-up text message.
+
+        A spoken voice note can't convey a URL, so after the voice note is
+        delivered we ship a terse text carrying just the tappable link(s).
+        No-op when the reply has no URL or the adapter can't send text.
+        """
+        from tools.voice_reply import extract_urls
+
+        urls = extract_urls(text or "")
+        if not urls:
+            return
+        adapter = self.adapters.get(event.source.platform)
+        if not adapter or not hasattr(adapter, "send"):
+            return
+        reply_anchor = self._reply_anchor_for_event(event)
+        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+        thread_meta = dict(thread_meta) if thread_meta else {}
+        thread_meta["notify"] = True
+        try:
+            await adapter.send(
+                event.source.chat_id,
+                "\n".join(urls),
+                reply_to=reply_anchor,
+                metadata=thread_meta,
+            )
+        except Exception as e:
+            logger.warning("tts_reply: link follow-up send failed: %s", e)
+
+    async def _send_voice_reply(self, event: MessageEvent, text: str) -> bool:
+        """Generate TTS audio and send as a voice message before the text reply.
+
+        Returns ``True`` only when a native voice-note reply (``voice.tts_reply``)
+        was delivered and should replace the text reply; ``False`` otherwise
+        (legacy /voice path, or render failure — text reply proceeds as normal).
+        """
+        # Voice-note replies (ADR 0024) supersede the legacy provider-agnostic
         # TTS path when enabled.
         if self._native_audio_out_enabled():
-            await self._send_native_voice_note(event, text)
-            return
+            return await self._send_native_voice_note(event, text)
 
         import uuid as _uuid
         audio_path = None
@@ -12123,7 +12201,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             tts_text = _strip_markdown_for_tts(text[:4000])
             if not tts_text:
-                return
+                return False
 
             # Telegram's adapter only sends native voice bubbles for OGG/Opus.
             # Other platforms keep the existing MP3 default.
@@ -12141,13 +12219,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = json.loads(result_json)
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
-                return
+                return False
 
             # Use the actual file path from result (may differ after opus conversion)
             actual_path = result.get("file_path", audio_path)
             if not result.get("success") or not os.path.isfile(actual_path):
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
+                return False
 
             await self._deliver_voice_audio(event, actual_path)
         except Exception as e:
@@ -12158,6 +12236,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     os.unlink(p)
                 except OSError:
                     pass
+        # Legacy /voice path never replaces the text reply — voice + text both
+        # go out, so the caller must not suppress the text.
+        return False
 
     async def _deliver_media_from_response(
         self,

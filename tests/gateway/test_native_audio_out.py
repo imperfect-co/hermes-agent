@@ -1,8 +1,10 @@
-"""Tests for native audio output (ADR 0024, Phase 1) gateway wiring.
+"""Tests for voice-note replies (voice.tts_reply, ADR 0024) gateway wiring.
 
-Covers the selection policy (``_should_send_voice_reply``) and the
-compose-then-render reply path (``_send_native_voice_note``) including the
-fail-loud fallback to plain text.
+Covers the selection policy (``_should_send_voice_reply``), the
+compose-then-render reply path (``_send_native_voice_note``) — including
+inbound-driven idiomatic locale, URL stripping, and the fail-loud fallback —
+the link follow-up (``_send_link_followup``), and the backwards-compatible
+``tts_reply``/``native_audio_out`` config read.
 """
 
 from __future__ import annotations
@@ -124,21 +126,73 @@ def _render_runner():
 
 class TestSendNativeVoiceNote:
     @pytest.mark.asyncio
-    async def test_delivers_structured_part(self, tmp_path):
+    async def test_delivers_structured_part_and_reports_delivered(self, tmp_path):
         runner = _render_runner()
         event = _event()
         rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
 
-        with patch("tools.voice_reply.render_voice_note", return_value=rendered):
-            await GatewayRunner._send_native_voice_note(runner, event, "Hello there")
+        with patch(
+            "tools.voice_reply.render_voice_note", return_value=rendered
+        ) as render:
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, "Hello there"
+            )
 
+        # Returns True so the caller suppresses the duplicate text reply.
+        assert delivered is True
         runner._deliver_voice_audio.assert_awaited_once()
         args = runner._deliver_voice_audio.call_args.args
         assert args[0] is event
         assert args[1] == rendered.path
+        # English inbound -> en-US + English steering direction prepended.
+        _, kwargs = render.call_args
+        assert kwargs["locale"] == "en-US"
+        spoken_arg = render.call_args.args[0]
+        assert spoken_arg.startswith(
+            "[Voice direction: idiomatic English as spoken in the United States]"
+        )
 
     @pytest.mark.asyncio
-    async def test_render_failure_falls_back_to_text(self, tmp_path):
+    async def test_locale_detected_from_inbound_not_reply(self, tmp_path):
+        # Inbound is Spanish; the English reply text must still be voiced in
+        # idiomatic Mexican Spanish (detection runs on event.text).
+        runner = _render_runner()
+        event = _event(text="Hola, ¿me puedes ayudar con el despliegue?")
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="es-MX")
+
+        with patch(
+            "tools.voice_reply.render_voice_note", return_value=rendered
+        ) as render:
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, "Sure, the deploy is live now."
+            )
+
+        assert delivered is True
+        _, kwargs = render.call_args
+        assert kwargs["locale"] == "es-MX"
+        assert render.call_args.args[0].startswith(
+            "[Voice direction: idiomatic Spanish as spoken in Mexico]"
+        )
+
+    @pytest.mark.asyncio
+    async def test_urls_stripped_from_spoken_text(self, tmp_path):
+        runner = _render_runner()
+        event = _event()
+        rendered = RenderedVoiceNote(path=str(tmp_path / "out.ogg"), locale="en-US")
+
+        with patch(
+            "tools.voice_reply.render_voice_note", return_value=rendered
+        ) as render:
+            await GatewayRunner._send_native_voice_note(
+                runner, event, "Here is the deploy: https://example.com/deploy/123"
+            )
+
+        spoken_arg = render.call_args.args[0]
+        assert "https://example.com" not in spoken_arg
+        assert "Here is the deploy" in spoken_arg
+
+    @pytest.mark.asyncio
+    async def test_render_failure_returns_false(self, tmp_path):
         runner = _render_runner()
         event = _event()
 
@@ -147,8 +201,11 @@ class TestSendNativeVoiceNote:
             side_effect=VoiceRenderError("gemini down"),
         ):
             # Must not raise — the plain text reply is delivered by the normal path.
-            await GatewayRunner._send_native_voice_note(runner, event, "Hello there")
+            delivered = await GatewayRunner._send_native_voice_note(
+                runner, event, "Hello there"
+            )
 
+        assert delivered is False
         runner._deliver_voice_audio.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -156,13 +213,69 @@ class TestSendNativeVoiceNote:
         runner = _render_runner()
         event = _event()
         with patch("tools.voice_reply.render_voice_note") as render:
-            await GatewayRunner._send_native_voice_note(runner, event, "   ")
+            delivered = await GatewayRunner._send_native_voice_note(runner, event, "   ")
+        assert delivered is False
         render.assert_not_called()
         runner._deliver_voice_audio.assert_not_awaited()
 
 
+def _followup_runner():
+    adapter = SimpleNamespace(send=AsyncMock(), name="whatsapp_cloud")
+    return SimpleNamespace(
+        adapters={Platform.WHATSAPP_CLOUD: adapter},
+        _reply_anchor_for_event=lambda event: "anchor-1",
+        _thread_metadata_for_source=lambda source, anchor: {"thread_id": "t1"},
+    ), adapter
+
+
+class TestSendLinkFollowup:
+    @pytest.mark.asyncio
+    async def test_sends_link_when_url_present(self):
+        runner, adapter = _followup_runner()
+        event = _event()
+        await GatewayRunner._send_link_followup(
+            runner, event, "The report is at https://example.com/r?id=5 — enjoy."
+        )
+        adapter.send.assert_awaited_once()
+        call = adapter.send.call_args
+        assert call.args[0] == "chat-1"
+        assert call.args[1] == "https://example.com/r?id=5"
+        assert call.kwargs["reply_to"] == "anchor-1"
+        assert call.kwargs["metadata"]["notify"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_send_when_no_url(self):
+        runner, adapter = _followup_runner()
+        event = _event()
+        await GatewayRunner._send_link_followup(runner, event, "plain reply, no link")
+        adapter.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_multiple_links_joined(self):
+        runner, adapter = _followup_runner()
+        event = _event()
+        await GatewayRunner._send_link_followup(
+            runner, event, "one https://a.com two https://b.com"
+        )
+        assert adapter.send.call_args.args[1] == "https://a.com\nhttps://b.com"
+
+
 class TestNativeAudioOutEnabled:
-    def test_reads_config_flag(self):
+    def test_new_tts_reply_key(self):
+        runner = SimpleNamespace()
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"voice": {"tts_reply": True}},
+        ):
+            assert GatewayRunner._native_audio_out_enabled(runner) is True
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"voice": {"tts_reply": False}},
+        ):
+            assert GatewayRunner._native_audio_out_enabled(runner) is False
+
+    def test_legacy_native_audio_out_key_still_read(self):
+        # Backwards compatibility: configs written before the rename still work.
         runner = SimpleNamespace()
         with patch(
             "hermes_cli.config.load_config",
@@ -170,6 +283,14 @@ class TestNativeAudioOutEnabled:
         ):
             assert GatewayRunner._native_audio_out_enabled(runner) is True
         with patch("hermes_cli.config.load_config", return_value={"voice": {}}):
+            assert GatewayRunner._native_audio_out_enabled(runner) is False
+
+    def test_new_key_takes_precedence_over_legacy(self):
+        runner = SimpleNamespace()
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"voice": {"tts_reply": False, "native_audio_out": True}},
+        ):
             assert GatewayRunner._native_audio_out_enabled(runner) is False
 
     def test_render_config_defaults_to_charon(self):
