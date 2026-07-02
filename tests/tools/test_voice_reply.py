@@ -1,4 +1,4 @@
-"""Tests for tools/voice_reply.py — native audio output (ADR 0024, Phase 1)."""
+"""Tests for tools/voice_reply.py — voice-note replies (tts_reply, ADR 0024)."""
 
 from __future__ import annotations
 
@@ -11,15 +11,19 @@ import pytest
 
 from tools.voice_reply import (
     RenderedVoiceNote,
+    VoiceProfile,
     VoiceRenderError,
+    detect_voice_language,
     detect_voice_locale,
+    detect_voice_profile,
+    extract_urls,
     render_voice_note,
     user_requested_spoken_reply,
 )
 
 
 # ---------------------------------------------------------------------------
-# Locale detection
+# Locale detection — idiomatic-territory defaults (es-MX, fa-IR).
 # ---------------------------------------------------------------------------
 class TestDetectVoiceLocale:
     @pytest.mark.parametrize(
@@ -31,8 +35,20 @@ class TestDetectVoiceLocale:
             "Mañana tengo una reunión",
         ],
     )
-    def test_spanish(self, text):
-        assert detect_voice_locale(text) == "es-ES"
+    def test_spanish_is_idiomatic_mexico(self, text):
+        # Idiomatic default: Mexican Spanish, not Castilian es-ES.
+        assert detect_voice_locale(text) == "es-MX"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "سلام، حال شما چطور است؟",
+            "لطفا وضعیت استقرار را بررسی کن",
+            "خیلی ممنون بابت پیام",
+        ],
+    )
+    def test_farsi_is_idiomatic_iran(self, text):
+        assert detect_voice_locale(text) == "fa-IR"
 
     @pytest.mark.parametrize(
         "text",
@@ -49,6 +65,112 @@ class TestDetectVoiceLocale:
 
     def test_custom_default(self):
         assert detect_voice_locale("hello there", default="fr-FR") == "fr-FR"
+
+    @pytest.mark.parametrize(
+        "text,language",
+        [
+            ("Hola, ¿cómo estás?", "es"),
+            ("سلام دوست من", "fa"),
+            ("hello there friend", "en"),
+            ("", "en"),
+        ],
+    )
+    def test_detect_voice_language(self, text, language):
+        assert detect_voice_language(text) == language
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "﻿hello there",  # leading BOM must not read as Farsi
+            "﻿",             # bare BOM
+            "plain english﻿",
+        ],
+    )
+    def test_bom_is_not_farsi(self, text):
+        # U+FEFF (BOM / zero-width no-break space) sits just past the Arabic
+        # Presentation Forms-B letters; it must not trigger Farsi detection.
+        assert detect_voice_language(text) == "en"
+        assert detect_voice_locale(text) == "en-US"
+
+    @pytest.mark.parametrize("text", ["﷐ stray", "﷯ end", "plain﷐"])
+    def test_noncharacters_are_not_farsi(self, text):
+        # U+FDD0–U+FDEF are Unicode noncharacters inside the Arabic Presentation
+        # Forms-A block; they are unassigned and must not read as Farsi.
+        assert detect_voice_language(text) == "en"
+        assert detect_voice_locale(text) == "en-US"
+
+
+# ---------------------------------------------------------------------------
+# Idiomatic voice profile + non-spoken steering direction
+# ---------------------------------------------------------------------------
+class TestDetectVoiceProfile:
+    def test_spanish_profile(self):
+        profile = detect_voice_profile("Hola, ¿cómo estás? Todo está muy bien.")
+        assert isinstance(profile, VoiceProfile)
+        assert profile.locale == "es-MX"
+        assert profile.language == "Spanish"
+        assert profile.territory == "Mexico"
+        assert profile.direction == (
+            "[Voice direction: idiomatic Spanish as spoken in Mexico]"
+        )
+
+    def test_farsi_profile(self):
+        profile = detect_voice_profile("سلام، حال شما چطور است؟")
+        assert profile.locale == "fa-IR"
+        assert profile.language == "Farsi"
+        assert profile.territory == "Iran"
+        assert profile.direction == (
+            "[Voice direction: idiomatic Farsi as spoken in Iran]"
+        )
+
+    def test_english_profile(self):
+        profile = detect_voice_profile("Hey, can you check the deploy status?")
+        assert profile.locale == "en-US"
+        assert profile.language == "English"
+        assert profile.territory == "the United States"
+        assert profile.direction == (
+            "[Voice direction: idiomatic English as spoken in the United States]"
+        )
+
+    def test_empty_defaults_to_english(self):
+        assert detect_voice_profile("").locale == "en-US"
+
+
+# ---------------------------------------------------------------------------
+# URL extraction (voice + text combo: links ride a follow-up text)
+# ---------------------------------------------------------------------------
+class TestExtractUrls:
+    def test_extracts_and_dedupes_in_order(self):
+        text = "see https://a.com/x and https://b.io then https://a.com/x again"
+        assert extract_urls(text) == ["https://a.com/x", "https://b.io"]
+
+    def test_trims_trailing_sentence_punctuation(self):
+        assert extract_urls("visit https://example.com/path.") == [
+            "https://example.com/path"
+        ]
+        assert extract_urls("(see http://x.io/a)") == ["http://x.io/a"]
+
+    def test_keeps_balanced_trailing_bracket(self):
+        # A balanced ")" is part of the URL path (Wikipedia-style), not
+        # sentence punctuation — stripping it would ship a broken link.
+        assert extract_urls(
+            "See https://en.wikipedia.org/wiki/Mercury_(planet)"
+        ) == ["https://en.wikipedia.org/wiki/Mercury_(planet)"]
+        # ...and a trailing sentence period after the balanced pair still goes.
+        assert extract_urls(
+            "done https://en.wikipedia.org/wiki/Mercury_(planet)."
+        ) == ["https://en.wikipedia.org/wiki/Mercury_(planet)"]
+
+    def test_trims_trailing_non_ascii_punctuation(self):
+        # Arabic comma (U+060C) after a link in a Farsi reply must not glue to
+        # the URL — fa-IR is a first-class spoken locale.
+        assert extract_urls("لینک: https://example.com/report، ادامه") == [
+            "https://example.com/report"
+        ]
+
+    @pytest.mark.parametrize("text", ["", "no links here", "ftp://not-http.example"])
+    def test_none_found(self, text):
+        assert extract_urls(text) == []
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +287,8 @@ class TestRenderVoiceNote:
 
         assert isinstance(part, RenderedVoiceNote)
         assert part.path.endswith(".ogg")
-        assert part.locale == "es-ES"
+        # Idiomatic default: Mexican Spanish (es-MX), not Castilian es-ES.
+        assert part.locale == "es-MX"
         assert part.mime_type == "audio/ogg; codecs=opus"
         assert os.path.getsize(part.path) > 0
 
@@ -180,7 +303,14 @@ class TestRenderVoiceNote:
             gc["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
             == "Charon"
         )
-        assert gc["speechConfig"]["languageCode"] == "es-ES"
+        assert gc["speechConfig"]["languageCode"] == "es-MX"
+        # Natural 1x speed: no speaking-rate reduction is applied anywhere in
+        # the payload (Charon reads at its native pace).
+        import json as _json
+
+        _payload = _json.dumps(captured["json"])
+        assert "speakingRate" not in _payload
+        assert "speaking_rate" not in _payload
         # The default 2.5-flash-preview-tts is a non-thinking model and rejects
         # thinkingConfig (HTTP 400), so it must be omitted for it.
         assert "thinkingConfig" not in gc

@@ -1953,10 +1953,11 @@ DEFAULT_CONFIG = {
         "gemini": {
             "model": "gemini-2.5-flash-preview-tts",
             "voice": "Kore",
-            # BCP-47 locale forced on the spoken output (e.g. "es-ES", "en-US").
-            # Empty => Gemini infers the locale from the text. The native audio
-            # output reply path (voice.native_audio_out) auto-detects this per
-            # reply, but a fixed value here pins it for the standalone TTS tool.
+            # BCP-47 locale forced on the spoken output (e.g. "es-MX", "en-US").
+            # Empty => Gemini infers the locale from the text. The voice-note
+            # reply path (voice.tts_reply) auto-detects this per reply from the
+            # inbound message, but a fixed value here pins it for the standalone
+            # TTS tool.
             "language_code": "",
             # Only sent to thinking-capable TTS models (gemini-3.x line); the
             # 2.5 preview TTS rejects thinkingConfig. For thinking models a
@@ -2041,13 +2042,16 @@ DEFAULT_CONFIG = {
         "record_key": "ctrl+b",
         "max_recording_seconds": 120,
         "auto_tts": False,
-        # Native audio output (ADR 0024). When True, the gateway renders a
-        # spoken reply (Gemini TTS -> opus/ogg voice note) whenever the inbound
-        # message was a voice note OR the user explicitly asked for a spoken
-        # reply. Independent of auto_tts / the /voice toggle. Render failures
-        # fall back to the plain text reply.
-        "native_audio_out": False,
-        # Prebuilt Gemini voice used for native audio output replies.
+        # Voice-note replies (a.k.a. native audio output, ADR 0024). When True,
+        # the gateway renders a spoken reply (Gemini TTS -> opus/ogg voice note)
+        # whenever the inbound message was a voice note OR the user explicitly
+        # asked for a spoken reply. Independent of auto_tts / the /voice toggle.
+        # Render failures fall back to the plain text reply.
+        #
+        # Renamed from the legacy ``native_audio_out`` key, which is still read
+        # for backwards compatibility when ``tts_reply`` is absent.
+        "tts_reply": False,
+        # Prebuilt Gemini voice used for voice-note replies.
         "native_audio_voice": "Charon",
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
         "silence_threshold": 200,     # RMS below this = silence (0-32767)

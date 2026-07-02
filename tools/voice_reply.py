@@ -26,15 +26,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_NATIVE_AUDIO_VOICE = "Charon"
 # Default spoken locale when text-based detection is inconclusive.
 DEFAULT_LOCALE = "en-US"
-SPANISH_LOCALE = "es-ES"
+# Idiomatic-territory defaults: render each language "as spoken in" the
+# territory our users most often mean, so Charon reads Spanish like a Mexican
+# speaker (not Castilian es-ES) and Farsi like an Iranian speaker. Adding a
+# language means both a new ``_VOICE_PROFILES`` row and a detection branch in
+# ``detect_voice_language``.
+SPANISH_LOCALE = "es-MX"
+FARSI_LOCALE = "fa-IR"
 # WhatsApp/Telegram render the green voice-note bubble for opus-in-ogg.
 VOICE_NOTE_MIME = "audio/ogg; codecs=opus"
 
 
 # ---------------------------------------------------------------------------
-# Locale detection — keep Spanish replies from being read with a gringo accent.
-# Phase 1 is a binary en-US / es-ES split; the heuristic is deliberately
-# conservative (default to en-US) and easy to extend with more locales later.
+# Locale detection — keep Spanish/Farsi replies from being read with a gringo
+# accent, and steer the voice toward the idiomatic territory for the language.
+# The heuristic is deliberately conservative (default to en-US) and is driven
+# off the INBOUND message so a Spanish question gets a Spanish-voiced answer
+# even when the reply mixes in English product names.
 # ---------------------------------------------------------------------------
 
 # Characters that only occur in Spanish among the languages we target.
@@ -56,26 +64,135 @@ _SPANISH_STOPWORDS = frozenset(
     }
 )
 _WORD_RE = re.compile(r"[a-zñáéíóúü]+")
+# Perso-Arabic script blocks (written as explicit code points so every
+# endpoint is auditable): Arabic (U+0600–U+06FF, includes the Persian letters
+# پ چ ژ گ ک ی), Arabic Supplement (U+0750–U+077F), Arabic Presentation
+# Forms-A split into U+FB50–U+FDCF and U+FDF0–U+FDFF to skip the 32 Unicode
+# noncharacters U+FDD0–U+FDEF (which are unassigned and must not read as
+# Farsi), and Arabic Presentation Forms-B letters (U+FE70–U+FEFC). The last
+# range stops at U+FEFC on purpose so the U+FEFF BOM / zero-width no-break
+# space can't masquerade as a Farsi character. Any hit is a strong,
+# unambiguous Farsi signal — no Latin-script language we target uses these
+# blocks.
+_FARSI_RE = re.compile(
+    "[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDCF\uFDF0-\uFDFF\uFE70-\uFEFC]"
+)
+
+# language key -> (BCP-47 locale, language display, idiomatic territory).
+# The display + territory feed the "[Voice direction: ...]" steering prefix.
+_VOICE_PROFILES: dict[str, tuple[str, str, str]] = {
+    "en": (DEFAULT_LOCALE, "English", "the United States"),
+    "es": (SPANISH_LOCALE, "Spanish", "Mexico"),
+    "fa": (FARSI_LOCALE, "Farsi", "Iran"),
+}
+
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    """Resolved spoken-output profile for one message.
+
+    ``locale`` pins the Gemini ``languageCode``; ``direction`` is the
+    non-spoken steering prefix prepended to the TTS text.
+    """
+
+    locale: str
+    language: str
+    territory: str
+
+    @property
+    def direction(self) -> str:
+        """The bracketed steering cue Gemini treats as delivery direction."""
+        return f"[Voice direction: idiomatic {self.language} as spoken in {self.territory}]"
+
+
+def detect_voice_language(text: str) -> str:
+    """Return the detected language key (``"en"``/``"es"``/``"fa"``)."""
+    if not text or not text.strip():
+        return "en"
+    # Farsi first: Perso-Arabic script never overlaps our Latin-script set.
+    if _FARSI_RE.search(text):
+        return "fa"
+    lowered = text.lower()
+    if any(ch in lowered for ch in _SPANISH_ONLY_CHARS):
+        return "es"
+    words = _WORD_RE.findall(lowered)
+    if words:
+        distinct_hits = len({w for w in words if w in _SPANISH_STOPWORDS})
+        has_accent = any(ch in _SPANISH_ACCENTS for ch in lowered)
+        # Two distinct Spanish function words — or one plus a Spanish accent —
+        # is a strong enough signal to switch languages.
+        if distinct_hits >= 2 or (distinct_hits >= 1 and has_accent):
+            return "es"
+    return "en"
+
+
+def detect_voice_profile(text: str) -> VoiceProfile:
+    """Resolve the idiomatic :class:`VoiceProfile` for ``text``.
+
+    Detection runs on the *inbound* message so the reply is voiced in the
+    language the user wrote in, steered toward the idiomatic territory
+    (Spanish -> Mexico, Farsi -> Iran, otherwise English -> US).
+    """
+    locale, language, territory = _VOICE_PROFILES[detect_voice_language(text)]
+    return VoiceProfile(locale=locale, language=language, territory=territory)
 
 
 def detect_voice_locale(text: str, default: str = DEFAULT_LOCALE) -> str:
-    """Best-effort BCP-47 locale for spoken output ("es-ES" or ``default``)."""
+    """Best-effort idiomatic BCP-47 locale for spoken output.
+
+    Returns ``default`` for English (or inconclusive) input, else the
+    idiomatic-territory locale for the detected language (e.g. ``es-MX``).
+    """
     if not text or not text.strip():
         return default
-    lowered = text.lower()
-    if any(ch in lowered for ch in _SPANISH_ONLY_CHARS):
-        return SPANISH_LOCALE
-
-    words = _WORD_RE.findall(lowered)
-    if not words:
+    language = detect_voice_language(text)
+    if language == "en":
         return default
-    distinct_hits = len({w for w in words if w in _SPANISH_STOPWORDS})
-    has_accent = any(ch in _SPANISH_ACCENTS for ch in lowered)
-    # Two distinct Spanish function words — or one plus a Spanish accent — is a
-    # strong enough signal to switch locales.
-    if distinct_hits >= 2 or (distinct_hits >= 1 and has_accent):
-        return SPANISH_LOCALE
-    return default
+    return _VOICE_PROFILES[language][0]
+
+
+# ---------------------------------------------------------------------------
+# URL extraction — a spoken voice note can't convey a link, so URLs are
+# stripped from the spoken text and delivered on a short follow-up text.
+# ---------------------------------------------------------------------------
+# Same base pattern as the URL-stripping regex in
+# ``tools.tts_tool._strip_markdown_for_tts`` (``https?://\S+``): what is
+# spoken-stripped is exactly what is extracted for the follow-up, so a link
+# is never both silenced and dropped.
+_URL_RE = re.compile(r"https?://\S+")
+# Trailing punctuation that is almost always sentence-level, not part of the
+# URL (matches how humans paste links mid-sentence). Includes the non-ASCII
+# sentence punctuation of the locales we speak (e.g. the Arabic comma ``،``
+# after a link in a Farsi reply), which otherwise stays glued to the URL.
+_URL_TRAILING_PUNCT = ".,;:!?\"')]}>،؛؟۔"
+# Closing brackets are stripped only when *unbalanced* within the URL — a
+# balanced pair belongs to the path (e.g. Wikipedia "..._(planet)"), and
+# blindly stripping it would ship a broken, non-tappable link.
+_URL_CLOSERS = {")": "(", "]": "[", "}": "{", ">": "<"}
+
+
+def _trim_url(url: str) -> str:
+    """Strip trailing sentence punctuation, preserving balanced closing brackets."""
+    while url and url[-1] in _URL_TRAILING_PUNCT:
+        opener = _URL_CLOSERS.get(url[-1])
+        if opener is not None and url.count(opener) >= url.count(url[-1]):
+            break
+        url = url[:-1]
+    return url
+
+
+def extract_urls(text: str) -> list[str]:
+    """Return the unique ``http(s)`` URLs in ``text``, order-preserved."""
+    if not text:
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_RE.findall(text):
+        url = _trim_url(match)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
 
 
 # ---------------------------------------------------------------------------
